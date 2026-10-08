@@ -23,6 +23,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
   const [selectedComp, setSelectedComp] = useState('clock');
   const [listeningKeyFor, setListeningKeyFor] = useState<string | null>(null);
   const [exportFolderHandle, setExportFolderHandle] = useState<FileSystemDirectoryHandle | null>(null);
+  const [copiedLink, setCopiedLink] = useState(false);
 
   const [autoSaveEnabled, setAutoSaveEnabled] = useState(false);
   const [autoSaveIntervalSec, setAutoSaveIntervalSec] = useState(15);
@@ -122,28 +123,35 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
   }, [state?.clock_running, id]);
 
   const updateField = async (field: string, value: any) => {
-    const updated = { ...state, [field]: value };
-    setState(updated);
-    await broadcastState(updated);
-    await supabase.from('scoreboards').update({ [field]: value }).eq('id', id);
+    setState((prev: any) => {
+      if (!prev) return prev;
+      const updated = { ...prev, [field]: value };
+      broadcastState(updated);
+      supabase.from('scoreboards').update({ [field]: value }).eq('id', id);
+      return updated;
+    });
   };
 
   const updateGraphicVar = async (key: string, value: any, immediate = false) => {
-    const newConfig = { ...(state?.graphics_config || {}), [key]: value };
-    const updated = { ...state, graphics_config: newConfig };
+    setState((prev: any) => {
+      if (!prev) return prev;
+      const newConfig = { ...(prev.graphics_config || {}), [key]: value };
+      const updated = { ...prev, graphics_config: newConfig };
 
-    setState(updated);
-    await broadcastState(updated);
+      broadcastState(updated);
 
-    if (debounceTimer.current) clearTimeout(debounceTimer.current);
+      if (debounceTimer.current) clearTimeout(debounceTimer.current);
 
-    if (immediate) {
-      await supabase.from('scoreboards').update({ graphics_config: newConfig }).eq('id', id);
-    } else {
-      debounceTimer.current = setTimeout(async () => {
-        await supabase.from('scoreboards').update({ graphics_config: newConfig }).eq('id', id);
-      }, 150);
-    }
+      if (immediate) {
+        supabase.from('scoreboards').update({ graphics_config: newConfig }).eq('id', id);
+      } else {
+        debounceTimer.current = setTimeout(async () => {
+          supabase.from('scoreboards').update({ graphics_config: newConfig }).eq('id', id);
+        }, 150);
+      }
+
+      return updated;
+    });
   };
 
   const getGVar = (key: string, fallback: any = '') => {
@@ -166,7 +174,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     borderCol: isLight ? '#dbe2ea' : isMedium ? '#7a828e' : isDefaultDark ? '#3d434a' : '#333333',
     tabHeaderBg: isLight ? '#e2e8f0' : isMedium ? '#495057' : isDefaultDark ? '#141414' : '#000000',
     tabActiveBg: isLight ? '#ffffff' : isMedium ? '#6c757d' : isDefaultDark ? '#2a2e33' : '#141414',
-    tabActiveText: '#007bff',
+    tabActiveText: '#f05a24',
     tabInactiveText: isLight ? '#475569' : '#d0d7de',
     btnSecondaryBg: isLight ? '#e2e8f0' : isMedium ? '#e9ecef' : isDefaultDark ? '#2d3238' : '#1a1a1a',
     btnSecondaryText: isLight ? '#2b3e50' : isMedium ? '#1e293b' : '#ffffff',
@@ -199,31 +207,58 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
   };
 
   const adjClock = async (seconds: number) => {
-    const currentState = stateRef.current;
-    if (!currentState) return;
-    const newTime = Math.max(0, currentState.clock_seconds + seconds);
-    updateField('clock_seconds', newTime);
+    setState((prev: any) => {
+      if (!prev) return prev;
+      const newSeconds = Math.max(0, prev.clock_seconds + seconds);
+      const updated = { ...prev, clock_seconds: newSeconds };
+      broadcastState(updated);
+      supabase.from('scoreboards').update({ clock_seconds: newSeconds }).eq('id', id);
+      return updated;
+    });
   };
 
+  // Safe Functional State Update Clock Toggle (Fixes Reset Bug)
   const toggleClock = async () => {
-    const currentState = stateRef.current;
-    if (!currentState) return;
-    const isRunning = !currentState.clock_running;
-    updateField('clock_running', isRunning);
+    setState((prev: any) => {
+      if (!prev) return prev;
+      
+      const newRunningState = !prev.clock_running;
+      const currentSeconds = prev.clock_seconds; // Preserve live ticking seconds
+
+      const updated = {
+        ...prev,
+        clock_running: newRunningState,
+        clock_seconds: currentSeconds
+      };
+
+      broadcastState(updated);
+      supabase.from('scoreboards').update({ clock_running: newRunningState }).eq('id', id);
+
+      return updated;
+    });
   };
 
   const resetClock = () => {
     const totalSecs = periodLengthMin * 60;
-    updateField('clock_running', false);
-    updateField('clock_seconds', totalSecs);
+    setState((prev: any) => {
+      if (!prev) return prev;
+      const updated = { ...prev, clock_running: false, clock_seconds: totalSecs };
+      broadcastState(updated);
+      supabase.from('scoreboards').update({ clock_running: false, clock_seconds: totalSecs }).eq('id', id);
+      return updated;
+    });
   };
 
   const adjStat = (team: 'away' | 'home', type: 'score' | 'sog', val: number) => {
-    const currentState = stateRef.current;
-    if (!currentState) return;
-    const field = `${team}_${type}`;
-    const newVal = Math.max(0, currentState[field] + val);
-    updateField(field, newVal);
+    setState((prev: any) => {
+      if (!prev) return prev;
+      const field = `${team}_${type}`;
+      const newVal = Math.max(0, (prev[field] || 0) + val);
+      const updated = { ...prev, [field]: newVal };
+      broadcastState(updated);
+      supabase.from('scoreboards').update({ [field]: newVal }).eq('id', id);
+      return updated;
+    });
   };
 
   const triggerRollout = async (num: number) => {
@@ -234,10 +269,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     const newMode = isActivating ? modeName : 'none';
     const txt = getGVar(`rollout${num}_text`, `ROLLOUT ${num}`);
     
-    const updated = { ...currentState, right_panel_mode: newMode, right_panel_text: txt };
-    setState(updated);
-    await broadcastState(updated);
-    await supabase.from('scoreboards').update({ right_panel_mode: newMode, right_panel_text: txt }).eq('id', id);
+    updateField('right_panel_mode', newMode);
+    updateField('right_panel_text', txt);
   };
 
   const triggerDelayedPenalty = async () => {
@@ -252,10 +285,9 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     if (!currentState) return;
     const isActive = !currentState.banner_active;
     const txt = getGVar('banner_text', "FULL WIDTH BANNER");
-    const updated = { ...currentState, banner_active: isActive, banner_text: txt };
-    setState(updated);
-    await broadcastState(updated);
-    await supabase.from('scoreboards').update({ banner_active: isActive, banner_text: txt }).eq('id', id);
+    
+    updateField('banner_active', isActive);
+    updateField('banner_text', txt);
   };
 
   useEffect(() => {
@@ -274,6 +306,10 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
       if (!matchedAction) return;
 
       e.preventDefault();
+
+      if (document.activeElement instanceof HTMLElement) {
+        document.activeElement.blur();
+      }
 
       switch (matchedAction) {
         case 'toggleClock': toggleClock(); break;
@@ -527,6 +563,13 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     alert("Scoreboard reset to factory defaults.");
   };
 
+  const copyOverlayLink = () => {
+    const url = `${window.location.origin}/view/${id}`;
+    navigator.clipboard.writeText(url);
+    setCopiedLink(true);
+    setTimeout(() => setCopiedLink(false), 2000);
+  };
+
   if (!state) return <div className="p-8 text-center text-slate-400 bg-[#1e1e1e] min-h-screen">Loading controller...</div>;
   const formatTime = (s: number) => `${Math.floor(s/60)}:${(s%60).toString().padStart(2,'0')}`;
 
@@ -612,10 +655,91 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
         #control-panel .sync-group { display: flex; align-items: center; gap: 8px; width: 100%; }
       `}</style>
 
-      <div style={{ background: themeVars.bgHeader, padding: '10px 20px', borderBottom: `1px solid ${themeVars.borderCol}`, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <span style={{ color: '#007bff', fontWeight: 'bold' }}>H2H OVERLAY SYSTEM</span>
-        <span style={{ color: themeVars.textMuted, fontSize: '12px' }}>Live Sync: Active</span>
-      </div>
+      {/* BRANDING HEADER BAR WITH STICKY GAME STATUS */}
+      <header style={{
+        backgroundColor: '#070a10',
+        borderBottom: '3px solid #f05a24',
+        padding: '10px 20px',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        boxShadow: '0 4px 12px rgba(0,0,0,0.5)'
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+          <img 
+            src="/images/logo-full.png" 
+            alt="H2H Overlay" 
+            onError={(e) => { (e.target as HTMLElement).style.display = 'none'; }}
+            style={{ height: '36px', width: 'auto', objectFit: 'contain' }}
+          />
+          <div style={{ fontWeight: '900', fontSize: '18px', letterSpacing: '1px', color: '#ffffff' }}>
+            H2H <span style={{ color: '#f05a24' }}>OVERLAY</span>
+          </div>
+
+          <div style={{ 
+            display: 'flex', 
+            alignItems: 'center', 
+            gap: '6px', 
+            backgroundColor: 'rgba(16, 185, 129, 0.15)', 
+            border: '1px solid rgba(16, 185, 129, 0.4)',
+            borderRadius: '20px',
+            padding: '3px 10px',
+            color: '#10b981',
+            fontSize: '11px',
+            fontWeight: 'bold'
+          }}>
+            <span>●</span> REALTIME LIVE
+          </div>
+        </div>
+
+        {/* HEADER COMPACT SCORE READOUT */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '16px', background: '#111827', padding: '4px 14px', borderRadius: '20px', border: '1px solid #374151' }}>
+          <span style={{ fontWeight: 'bold', fontSize: '13px', color: '#3b82f6' }}>
+            {state.away_name || 'AWAY'} <strong style={{ color: '#fff', fontSize: '15px' }}>{state.away_score}</strong> <span style={{ fontSize: '11px', color: '#aaa' }}>({state.away_sog})</span>
+          </span>
+          <span style={{ color: state.clock_running ? '#10b981' : '#f05a24', fontWeight: 'bold', fontSize: '13px', fontFamily: 'monospace' }}>
+            {formatTime(state.clock_seconds)}
+          </span>
+          <span style={{ fontWeight: 'bold', fontSize: '13px', color: '#ef4444' }}>
+            <span style={{ fontSize: '11px', color: '#aaa' }}>({state.home_sog})</span> <strong style={{ color: '#fff', fontSize: '15px' }}>{state.home_score}</strong> {state.home_name || 'HOME'}
+          </span>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <button 
+            onClick={copyOverlayLink}
+            style={{
+              backgroundColor: '#0f2b5c',
+              color: '#ffffff',
+              border: '1px solid #1d4ed8',
+              padding: '6px 12px',
+              borderRadius: '6px',
+              fontWeight: 'bold',
+              fontSize: '12px',
+              cursor: 'pointer'
+            }}
+          >
+            {copiedLink ? '✓ Copied!' : '📋 Copy Overlay Link'}
+          </button>
+
+          <a 
+            href={`/view/${id}`} 
+            target="_blank" 
+            rel="noreferrer"
+            style={{
+              backgroundColor: '#f05a24',
+              color: '#ffffff',
+              padding: '6px 12px',
+              borderRadius: '6px',
+              fontWeight: 'bold',
+              fontSize: '12px',
+              textDecoration: 'none'
+            }}
+          >
+            📺 Open OBS View
+          </a>
+        </div>
+      </header>
 
       <div className="tab-headers" style={{ display: 'flex' }}>
         <button className={`tab-btn ${activeTab === 'tab-ops' ? 'active' : ''}`} onClick={() => setActiveTab('tab-ops')}>GAME OPERATIONS</button>
@@ -626,6 +750,80 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
 
       {/* GAME OPS TAB */}
       <div id="tab-ops" className={`tab-content ${activeTab === 'tab-ops' ? 'active' : ''}`}>
+        
+        {/* LIVE BROADCAST DISPLAY CARD */}
+        <div className="box" style={{ 
+          background: '#0a0e17', 
+          border: '2px solid #f05a24', 
+          padding: '16px', 
+          borderRadius: '10px', 
+          marginBottom: '20px' 
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #222', paddingBottom: '8px', marginBottom: '12px' }}>
+            <span style={{ fontSize: '11px', color: '#888', fontWeight: 'bold', letterSpacing: '1px' }}>
+              LIVE BROADCAST DISPLAY PREVIEW
+            </span>
+            <span style={{ fontSize: '12px', color: '#f05a24', fontWeight: 'bold' }}>
+              PERIOD: {state.period || '1ST'}
+            </span>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: '16px', alignItems: 'center', textAlign: 'center' }}>
+            
+            {/* Away Team Status */}
+            <div style={{ background: state.away_color || '#00468b', padding: '12px', borderRadius: '8px', color: '#ffffff' }}>
+              <div style={{ fontSize: '14px', fontWeight: '900', textTransform: 'uppercase', letterSpacing: '1px' }}>
+                {state.away_name || 'AWAY'}
+              </div>
+              <div style={{ fontSize: '42px', fontWeight: '900', lineHeight: 1 }}>
+                {state.away_score}
+              </div>
+              <div style={{ fontSize: '11px', opacity: 0.8, marginTop: '4px' }}>
+                SOG: <strong>{state.away_sog}</strong>
+              </div>
+            </div>
+
+            {/* Center Game Clock */}
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+              <div style={{ 
+                fontSize: '36px', 
+                fontWeight: '900', 
+                fontFamily: 'monospace', 
+                color: state.clock_running ? '#10b981' : '#ffffff',
+                background: '#141824',
+                padding: '6px 16px',
+                borderRadius: '6px',
+                border: `1px solid ${state.clock_running ? '#10b981' : '#333'}`
+              }}>
+                {formatTime(state.clock_seconds)}
+              </div>
+              <span style={{ 
+                fontSize: '10px', 
+                fontWeight: 'bold', 
+                marginTop: '6px', 
+                color: state.clock_running ? '#10b981' : '#ef4444',
+                textTransform: 'uppercase'
+              }}>
+                {state.clock_running ? '● CLOCK RUNNING' : '❚❚ PAUSED'}
+              </span>
+            </div>
+
+            {/* Home Team Status */}
+            <div style={{ background: state.home_color || '#222222', padding: '12px', borderRadius: '8px', color: '#ffffff' }}>
+              <div style={{ fontSize: '14px', fontWeight: '900', textTransform: 'uppercase', letterSpacing: '1px' }}>
+                {state.home_name || 'HOME'}
+              </div>
+              <div style={{ fontSize: '42px', fontWeight: '900', lineHeight: 1 }}>
+                {state.home_score}
+              </div>
+              <div style={{ fontSize: '11px', opacity: 0.8, marginTop: '4px' }}>
+                SOG: <strong>{state.home_sog}</strong>
+              </div>
+            </div>
+
+          </div>
+        </div>
+
         <div className="panel-grid">
           
           <div className="box">
