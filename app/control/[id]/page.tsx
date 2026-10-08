@@ -158,28 +158,30 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     return state?.graphics_config?.[key] ?? fallback;
   };
 
+ // UI Theme Palettes from Spec Sheet
   const currentTheme = getGVar('uiTheme', 'Light');
   const isLight = currentTheme === 'Light';
-  const isMedium = currentTheme === 'Medium';
-  const isDefaultDark = currentTheme === 'Default' || currentTheme === 'Studio Dark';
+  const isConcrete = currentTheme === 'Concrete';
+  const isSlate = currentTheme === 'Slate';
+  const isStudioBlack = currentTheme === 'Studio Black' || currentTheme === 'Default' || currentTheme === 'Medium' || currentTheme === 'Studio Dark';
 
   const themeVars = {
-    bgPage: isLight ? '#eef2f7' : isMedium ? '#5c636e' : isDefaultDark ? '#22262a' : '#0e0e0e',
-    bgHeader: isLight ? '#e2e8f0' : isMedium ? '#495057' : isDefaultDark ? '#141414' : '#111111',
-    bgBox: isLight ? '#ffffff' : isMedium ? '#6c757d' : isDefaultDark ? '#2a2e33' : '#181818',
-    bgInput: isLight ? '#f1f5f9' : isMedium ? '#eef2f7' : isDefaultDark ? '#16181b' : '#0a0a0a',
-    textColor: isLight ? '#2b3e50' : '#ffffff',
-    headerTextCol: isMedium ? '#e2e8f0' : isLight ? '#2b3e50' : '#ffffff',
-    textMuted: isLight ? '#64748b' : isMedium ? '#e2e8f0' : '#aaaaaa',
-    borderCol: isLight ? '#dbe2ea' : isMedium ? '#7a828e' : isDefaultDark ? '#3d434a' : '#333333',
-    tabHeaderBg: isLight ? '#e2e8f0' : isMedium ? '#495057' : isDefaultDark ? '#141414' : '#000000',
-    tabActiveBg: isLight ? '#ffffff' : isMedium ? '#6c757d' : isDefaultDark ? '#2a2e33' : '#141414',
-    tabActiveText: '#f05a24',
-    tabInactiveText: isLight ? '#475569' : '#d0d7de',
-    btnSecondaryBg: isLight ? '#e2e8f0' : isMedium ? '#e9ecef' : isDefaultDark ? '#2d3238' : '#1a1a1a',
-    btnSecondaryText: isLight ? '#2b3e50' : isMedium ? '#1e293b' : '#ffffff',
-    btnSecondaryBorder: isLight ? '#b0c4de' : isMedium ? '#ced4da' : isDefaultDark ? '#4a5059' : '#444444',
-    coloredBtnBorder: '1px solid #b0c4de'
+    bgPage: isLight ? '#F1F4F8' : isConcrete ? '#888E99' : isSlate ? '#2F343E' : '#1C1C1E',
+    bgHeader: isLight ? '#E1E5E9' : isConcrete ? '#535862' : isSlate ? '#2F343E' : '#141414',
+    bgBox: isLight ? '#FFFFFF' : isConcrete ? '#535862' : isSlate ? '#454A53' : '#22262B',
+    bgInput: isLight ? '#F1F5F9' : isConcrete ? '#6C737E' : isSlate ? '#2F343E' : '#16181B',
+    textColor: isLight ? '#262A32' : isConcrete ? '#FFFFFF' : isSlate ? '#FFFFFF' : '#F0F0F0',
+    headerTextCol: isLight ? '#262A32' : '#FFFFFF',
+    textMuted: isLight ? '#1C2431' : isConcrete ? '#BDC601' : isSlate ? '#8892A2' : '#aaaaaa',
+    borderCol: isLight ? '#E1E5E9' : isConcrete ? '#9AA1AD' : isSlate ? '#A1A1A1' : '#3C3C41',
+    tabHeaderBg: isLight ? '#E1E5E9' : isConcrete ? '#495057' : isSlate ? '#2F343E' : '#141414',
+    tabActiveBg: isLight ? '#FFFFFF' : isConcrete ? '#535862' : isSlate ? '#454A53' : '#22262B',
+    tabActiveText: '#FF5100',
+    tabInactiveText: isLight ? '#262A32' : '#D0D7DE',
+    btnSecondaryBg: isLight ? '#E1E5E9' : isConcrete ? '#6C737E' : isSlate ? '#535862' : '#2D3238',
+    btnSecondaryText: isLight ? '#262A32' : '#FFFFFF',
+    btnSecondaryBorder: isLight ? '#B0C4DE' : isConcrete ? '#9AA1AD' : isSlate ? '#A1A1A1' : '#3C3C41',
+    coloredBtnBorder: '1px solid rgba(255,255,255,0.2)'
   };
 
   useEffect(() => {
@@ -223,7 +225,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
       if (!prev) return prev;
       
       const newRunningState = !prev.clock_running;
-      const currentSeconds = prev.clock_seconds; // Preserve live ticking seconds
+      const currentSeconds = prev.clock_seconds; // Lock in live ticking time
 
       const updated = {
         ...prev,
@@ -237,7 +239,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
       return updated;
     });
   };
-
+  
   const resetClock = () => {
     const totalSecs = periodLengthMin * 60;
     setState((prev: any) => {
@@ -655,25 +657,36 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
         #control-panel .sync-group { display: flex; align-items: center; gap: 8px; width: 100%; }
       `}</style>
 
-      {/* BRANDING HEADER BAR WITH STICKY GAME STATUS */}
+  {/* BRANDING HEADER BAR WITH CAPSULE PILL LOGO */}
       <header style={{
-        backgroundColor: '#070a10',
-        borderBottom: '3px solid #f05a24',
+        backgroundColor: themeVars.bgHeader,
+        borderBottom: `3px solid ${themeVars.borderCol}`,
         padding: '10px 20px',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
-        boxShadow: '0 4px 12px rgba(0,0,0,0.5)'
+        boxShadow: '0 4px 12px rgba(0,0,0,0.15)'
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-          <img 
-            src="/images/logo-full.png" 
-            alt="H2H Overlay" 
-            onError={(e) => { (e.target as HTMLElement).style.display = 'none'; }}
-            style={{ height: '36px', width: 'auto', objectFit: 'contain' }}
-          />
-          <div style={{ fontWeight: '900', fontSize: '18px', letterSpacing: '1px', color: '#ffffff' }}>
-            H2H <span style={{ color: '#f05a24' }}>OVERLAY</span>
+          {/* Capsule Pill Border for Brand Logo */}
+          <div style={{ 
+            display: 'flex', 
+            alignItems: 'center', 
+            gap: '8px', 
+            background: '#FFFFFF', 
+            border: '2px solid #1F50A2', 
+            borderRadius: '24px', 
+            padding: '4px 16px' 
+          }}>
+            <img 
+              src="/images/logo-icon.png" 
+              alt="H2H Emblem" 
+              onError={(e) => { (e.target as HTMLElement).style.display = 'none'; }}
+              style={{ height: '24px', width: 'auto' }}
+            />
+            <span style={{ fontWeight: '900', fontSize: '16px', color: '#1F50A2', letterSpacing: '0.5px' }}>
+              H2H <span style={{ color: '#FF5100' }}>OVERLAY</span>
+            </span>
           </div>
 
           <div style={{ 
@@ -683,11 +696,51 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             backgroundColor: 'rgba(16, 185, 129, 0.15)', 
             border: '1px solid rgba(16, 185, 129, 0.4)',
             borderRadius: '20px',
-            padding: '3px 10px',
+            padding: '4px 12px',
             color: '#10b981',
             fontSize: '11px',
             fontWeight: 'bold'
           }}>
+            <span>●</span> Live Sync: Active
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <button 
+            onClick={copyOverlayLink}
+            style={{
+              backgroundColor: '#1F50A2',
+              color: '#ffffff',
+              border: 'none',
+              padding: '8px 16px',
+              borderRadius: '6px',
+              fontWeight: 'bold',
+              fontSize: '12px',
+              cursor: 'pointer'
+            }}
+          >
+            {copiedLink ? '✓ Copied!' : '■ Copy Overlay Link'}
+          </button>
+
+          <a 
+            href={`/view/${id}`} 
+            target="_blank" 
+            rel="noreferrer"
+            style={{
+              backgroundColor: '#FF5100',
+              color: '#ffffff',
+              padding: '8px 16px',
+              borderRadius: '6px',
+              fontWeight: 'bold',
+              fontSize: '12px',
+              textDecoration: 'none'
+            }}
+          >
+            ● Open OBS View
+          </a>
+        </div>
+      </header>
+      
             <span>●</span> REALTIME LIVE
           </div>
         </div>
@@ -752,72 +805,77 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
       <div id="tab-ops" className={`tab-content ${activeTab === 'tab-ops' ? 'active' : ''}`}>
         
         {/* LIVE BROADCAST DISPLAY CARD */}
+        {/* LIVE BROADCAST DISPLAY PREVIEW (MATCHING MOCKUP LAYOUT) */}
         <div className="box" style={{ 
-          background: '#0a0e17', 
-          border: '2px solid #f05a24', 
-          padding: '16px', 
-          borderRadius: '10px', 
+          background: themeVars.bgBox, 
+          border: `1px solid ${themeVars.borderCol}`, 
+          padding: '12px 16px', 
+          borderRadius: '8px', 
           marginBottom: '20px' 
         }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #222', paddingBottom: '8px', marginBottom: '12px' }}>
-            <span style={{ fontSize: '11px', color: '#888', fontWeight: 'bold', letterSpacing: '1px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+            <span style={{ fontSize: '11px', color: themeVars.textColor, fontWeight: 'bold', letterSpacing: '0.5px' }}>
               LIVE BROADCAST DISPLAY PREVIEW
             </span>
-            <span style={{ fontSize: '12px', color: '#f05a24', fontWeight: 'bold' }}>
+            <span style={{ fontSize: '11px', color: '#FF5100', fontWeight: 'bold' }}>
               PERIOD: {state.period || '1ST'}
             </span>
           </div>
 
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr auto 1fr', gap: '16px', alignItems: 'center', textAlign: 'center' }}>
+          {/* Sleek Inset Recessed Groove */}
+          <div style={{ 
+            background: isLight ? '#D5DCE2' : '#141820', 
+            borderRadius: '6px', 
+            padding: '10px 24px', 
+            display: 'flex', 
+            alignItems: 'center', 
+            justifyContent: 'center',
+            gap: '30px',
+            border: `1px solid ${isLight ? '#BCC5CE' : '#0A0D12'}`,
+            boxShadow: 'inset 0 2px 6px rgba(0,0,0,0.3)'
+          }}>
             
-            {/* Away Team Status */}
-            <div style={{ background: state.away_color || '#00468b', padding: '12px', borderRadius: '8px', color: '#ffffff' }}>
-              <div style={{ fontSize: '14px', fontWeight: '900', textTransform: 'uppercase', letterSpacing: '1px' }}>
-                {state.away_name || 'AWAY'}
+            {/* AWAY TEAM */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <div style={{ textAlign: 'right' }}>
+                <div style={{ fontSize: '13px', fontWeight: '900', color: themeVars.textColor }}>{state.away_name || 'AWAY'}</div>
+                <div style={{ fontSize: '10px', color: themeVars.textMuted }}>SOG:{state.away_sog}</div>
               </div>
-              <div style={{ fontSize: '42px', fontWeight: '900', lineHeight: 1 }}>
+              <div style={{ borderRight: '3px solid #1F50A2', height: '24px', margin: '0 4px' }} />
+              <div style={{ fontSize: '32px', fontWeight: '900', color: themeVars.textColor, minWidth: '24px', textAlign: 'center' }}>
                 {state.away_score}
-              </div>
-              <div style={{ fontSize: '11px', opacity: 0.8, marginTop: '4px' }}>
-                SOG: <strong>{state.away_sog}</strong>
               </div>
             </div>
 
-            {/* Center Game Clock */}
+            {/* CENTER CLOCK & STATUS */}
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
               <div style={{ 
-                fontSize: '36px', 
+                fontSize: '28px', 
                 fontWeight: '900', 
                 fontFamily: 'monospace', 
-                color: state.clock_running ? '#10b981' : '#ffffff',
-                background: '#141824',
-                padding: '6px 16px',
-                borderRadius: '6px',
-                border: `1px solid ${state.clock_running ? '#10b981' : '#333'}`
+                background: '#090C12',
+                color: '#FFFFFF',
+                padding: '2px 16px',
+                borderRadius: '4px',
+                border: '1px solid #2B3240',
+                letterSpacing: '1px'
               }}>
                 {formatTime(state.clock_seconds)}
               </div>
-              <span style={{ 
-                fontSize: '10px', 
-                fontWeight: 'bold', 
-                marginTop: '6px', 
-                color: state.clock_running ? '#10b981' : '#ef4444',
-                textTransform: 'uppercase'
-              }}>
-                {state.clock_running ? '● CLOCK RUNNING' : '❚❚ PAUSED'}
+              <span style={{ fontSize: '9px', fontWeight: 'bold', marginTop: '3px', color: state.clock_running ? '#10b981' : '#ef4444', letterSpacing: '0.5px' }}>
+                {state.clock_running ? '● RUNNING' : '❚❚ PAUSED'}
               </span>
             </div>
 
-            {/* Home Team Status */}
-            <div style={{ background: state.home_color || '#222222', padding: '12px', borderRadius: '8px', color: '#ffffff' }}>
-              <div style={{ fontSize: '14px', fontWeight: '900', textTransform: 'uppercase', letterSpacing: '1px' }}>
-                {state.home_name || 'HOME'}
-              </div>
-              <div style={{ fontSize: '42px', fontWeight: '900', lineHeight: 1 }}>
+            {/* HOME TEAM */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <div style={{ fontSize: '32px', fontWeight: '900', color: themeVars.textColor, minWidth: '24px', textAlign: 'center' }}>
                 {state.home_score}
               </div>
-              <div style={{ fontSize: '11px', opacity: 0.8, marginTop: '4px' }}>
-                SOG: <strong>{state.home_sog}</strong>
+              <div style={{ borderLeft: '3px solid #FF5100', height: '24px', margin: '0 4px' }} />
+              <div style={{ textAlign: 'left' }}>
+                <div style={{ fontSize: '13px', fontWeight: '900', color: themeVars.textColor }}>{state.home_name || 'HOME'}</div>
+                <div style={{ fontSize: '10px', color: themeVars.textMuted }}>SOG:{state.home_sog}</div>
               </div>
             </div>
 
@@ -1685,15 +1743,15 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
                 <label style={{ fontSize: '13px', fontWeight: 'bold' }}>Interface Theme:</label>
                 <select 
-                  value={currentTheme === 'Studio Dark' ? 'Default' : currentTheme} 
-                  onChange={(e) => updateGraphicVar('uiTheme', e.target.value, true)}
-                  style={{ width: '160px', padding: '6px', fontSize: '12px', ...selectStyle }}
-                >
-                  <option value="Light" style={selectStyle}>Light</option>
-                  <option value="Medium" style={selectStyle}>Medium</option>
-                  <option value="Default" style={selectStyle}>Default</option>
-                  <option value="High Contrast Dark" style={selectStyle}>High Contrast Dark</option>
-                </select>
+                value={currentTheme} 
+                onChange={(e) => updateGraphicVar('uiTheme', e.target.value, true)}
+                style={{ width: '100%', padding: '8px', fontSize: '12px', ...selectStyle }}
+              >
+                <option value="Light" style={selectStyle}>Option 1: Light (#F1F4F8)</option>
+                <option value="Concrete" style={selectStyle}>Option 2: Concrete (#888E99)</option>
+                <option value="Slate" style={selectStyle}>Option 3: Slate (#2F343E)</option>
+                <option value="Studio Black" style={selectStyle}>Option 4: Studio Black (#1C1C1E)</option>
+              </select>
               </div>
             </div>
 
