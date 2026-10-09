@@ -158,12 +158,13 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     return state?.graphics_config?.[key] ?? fallback;
   };
 
- // UI Theme Palettes from Spec Sheet
+  // UI Theme Palettes from Spec Sheet
   const currentTheme = getGVar('uiTheme', 'Light');
   const isLight = currentTheme === 'Light';
   const isConcrete = currentTheme === 'Concrete';
   const isSlate = currentTheme === 'Slate';
-  const isStudioBlack = currentTheme === 'Studio Black' || currentTheme === 'Default' || currentTheme === 'Medium' || currentTheme === 'Studio Dark';
+  const isStudioBlack = currentTheme === 'Studio Black' || currentTheme === 'Default' || currentTheme === 'Studio Dark';
+  const isMedium = isConcrete;
 
   const themeVars = {
     bgPage: isLight ? '#F1F4F8' : isConcrete ? '#888E99' : isSlate ? '#2F343E' : '#1C1C1E',
@@ -219,13 +220,12 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     });
   };
 
-  // Safe Functional State Update Clock Toggle (Fixes Reset Bug)
   const toggleClock = async () => {
     setState((prev: any) => {
       if (!prev) return prev;
       
       const newRunningState = !prev.clock_running;
-      const currentSeconds = prev.clock_seconds; // Lock in live ticking time
+      const currentSeconds = prev.clock_seconds;
 
       const updated = {
         ...prev,
@@ -589,7 +589,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
 
   const selectStyle: React.CSSProperties = {
     backgroundColor: themeVars.bgInput,
-    color: isMedium ? '#1e293b' : themeVars.textColor,
+    color: themeVars.textColor,
     borderColor: themeVars.borderCol
   };
 
@@ -640,24 +640,42 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
 
   return (
     <div id="control-panel" style={{ backgroundColor: themeVars.bgPage, color: themeVars.textColor, minHeight: '100vh' }}>
+      
       <style>{`
         body, html { background-color: ${themeVars.bgPage} !important; color: ${themeVars.textColor} !important; }
-        #control-panel .box { background-color: ${themeVars.bgBox} !important; border-color: ${themeVars.borderCol} !important; }
+        #control-panel .box { background-color: ${themeVars.bgBox} !important; border-color: ${themeVars.borderCol} !important; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
         #control-panel .box h3, #control-panel .box label { color: ${themeVars.headerTextCol} !important; }
-        #control-panel input, #control-panel select { background-color: ${themeVars.bgInput} !important; color: ${isMedium ? '#1e293b' : themeVars.textColor} !important; border-color: ${themeVars.borderCol} !important; }
+        #control-panel input, #control-panel select { background-color: ${themeVars.bgInput} !important; color: ${themeVars.textColor} !important; border-color: ${themeVars.borderCol} !important; }
         #control-panel .tab-headers { background-color: ${themeVars.tabHeaderBg} !important; border-bottom-color: ${themeVars.borderCol} !important; }
-        #control-panel .tab-btn { color: ${themeVars.tabInactiveText} !important; }
-        #control-panel .tab-btn.active { background-color: ${themeVars.tabActiveBg} !important; color: ${themeVars.tabActiveText} !important; }
-        #control-panel .btn-green { background-color: #10b981 !important; color: #ffffff !important; border: ${themeVars.coloredBtnBorder} !important; }
-        #control-panel .btn-blue { background-color: #3b82f6 !important; color: #ffffff !important; border: ${themeVars.coloredBtnBorder} !important; }
-        #control-panel .btn-orange { background-color: #f59e0b !important; color: #ffffff !important; border: ${themeVars.coloredBtnBorder} !important; }
-        #control-panel .btn-red { background-color: #ef4444 !important; color: #ffffff !important; border: ${themeVars.coloredBtnBorder} !important; }
-        #control-panel .btn-purple { background-color: #8b5cf6 !important; color: #ffffff !important; border: ${themeVars.coloredBtnBorder} !important; }
-        #control-panel .btn-secondary-theme { background-color: ${themeVars.btnSecondaryBg} !important; color: ${themeVars.btnSecondaryText} !important; border: 1px solid ${themeVars.btnSecondaryBorder} !important; }
-        #control-panel .sync-group { display: flex; align-items: center; gap: 8px; width: 100%; }
+        #control-panel .tab-btn { color: ${themeVars.tabInactiveText} !important; font-weight: bold; }
+        #control-panel .tab-btn.active { background-color: ${themeVars.tabActiveBg} !important; color: ${themeVars.tabActiveText} !important; border-bottom: 3px solid #FF5100; }
+        
+        #control-panel .btn {
+          border-radius: 8px !important;
+          font-weight: 800 !important;
+          letter-spacing: 0.5px !important;
+          transition: all 0.1s ease !important;
+          box-shadow: inset 0 1px 0 rgba(255,255,255,0.35), 0 3px 6px rgba(0,0,0,0.2) !important;
+          border-bottom: 2px solid rgba(0,0,0,0.3) !important;
+          cursor: pointer !important;
+        }
+        #control-panel .btn:active {
+          transform: translateY(2px) !important;
+          box-shadow: inset 0 1px 3px rgba(0,0,0,0.4) !important;
+        }
+        #control-panel .btn-green { background: linear-gradient(180deg, #12c98c 0%, #0d9668 100%) !important; color: #ffffff !important; }
+        #control-panel .btn-blue { background: linear-gradient(180deg, #2860bd 0%, #173e80 100%) !important; color: #ffffff !important; }
+        #control-panel .btn-orange { background: linear-gradient(180deg, #ff6a21 0%, #d43d00 100%) !important; color: #ffffff !important; }
+        #control-panel .btn-red { background: linear-gradient(180deg, #f85b5b 0%, #c92a2a 100%) !important; color: #ffffff !important; }
+        #control-panel .btn-purple { background: linear-gradient(180deg, #a073f8 0%, #6d38d9 100%) !important; color: #ffffff !important; }
+        #control-panel .btn-secondary-theme { 
+          background: linear-gradient(180deg, ${isLight ? '#FFFFFF' : '#636a75'} 0%, ${isLight ? '#E1E5E9' : '#454a52'} 100%) !important; 
+          color: ${themeVars.btnSecondaryText} !important; 
+          border: 1px solid ${themeVars.btnSecondaryBorder} !important; 
+        }
       `}</style>
 
-  {/* BRANDING HEADER BAR WITH CAPSULE PILL LOGO */}
+      {/* BRANDING HEADER BAR WITH CAPSULE PILL LOGO */}
       <header style={{
         backgroundColor: themeVars.bgHeader,
         borderBottom: `3px solid ${themeVars.borderCol}`,
@@ -668,22 +686,24 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
         boxShadow: '0 4px 12px rgba(0,0,0,0.15)'
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-          {/* Capsule Pill Border for Brand Logo */}
           <div style={{ 
             display: 'flex', 
             alignItems: 'center', 
-            gap: '8px', 
+            gap: '10px', 
             background: '#FFFFFF', 
             border: '2px solid #1F50A2', 
             borderRadius: '24px', 
-            padding: '4px 16px' 
+            padding: '5px 18px',
+            boxShadow: '0 2px 6px rgba(0,0,0,0.1)'
           }}>
-            <img 
-              src="/images/logo-icon.png" 
-              alt="H2H Emblem" 
-              onError={(e) => { (e.target as HTMLElement).style.display = 'none'; }}
-              style={{ height: '24px', width: 'auto' }}
-            />
+            <svg width="24" height="24" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M10 20 L45 5 L45 95 L10 80 Z" fill="#1F50A2" />
+              <path d="M90 20 L55 5 L55 95 L90 80 Z" fill="#FF5100" />
+              <path d="M30 40 L45 40 L45 60 L30 60 Z" fill="#FFFFFF" />
+              <path d="M70 40 L55 40 L55 60 L70 60 Z" fill="#FFFFFF" />
+              <polygon points="40,50 60,50 50,45" fill="#1F50A2" />
+              <polygon points="40,50 60,50 50,55" fill="#FF5100" />
+            </svg>
             <span style={{ fontWeight: '900', fontSize: '16px', color: '#1F50A2', letterSpacing: '0.5px' }}>
               H2H <span style={{ color: '#FF5100' }}>OVERLAY</span>
             </span>
@@ -740,72 +760,27 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
           </a>
         </div>
       </header>
-      
-            <span>●</span> REALTIME LIVE
-          </div>
-        </div>
 
-        {/* HEADER COMPACT SCORE READOUT */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '16px', background: '#111827', padding: '4px 14px', borderRadius: '20px', border: '1px solid #374151' }}>
-          <span style={{ fontWeight: 'bold', fontSize: '13px', color: '#3b82f6' }}>
-            {state.away_name || 'AWAY'} <strong style={{ color: '#fff', fontSize: '15px' }}>{state.away_score}</strong> <span style={{ fontSize: '11px', color: '#aaa' }}>({state.away_sog})</span>
-          </span>
-          <span style={{ color: state.clock_running ? '#10b981' : '#f05a24', fontWeight: 'bold', fontSize: '13px', fontFamily: 'monospace' }}>
-            {formatTime(state.clock_seconds)}
-          </span>
-          <span style={{ fontWeight: 'bold', fontSize: '13px', color: '#ef4444' }}>
-            <span style={{ fontSize: '11px', color: '#aaa' }}>({state.home_sog})</span> <strong style={{ color: '#fff', fontSize: '15px' }}>{state.home_score}</strong> {state.home_name || 'HOME'}
-          </span>
-        </div>
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <button 
-            onClick={copyOverlayLink}
-            style={{
-              backgroundColor: '#0f2b5c',
-              color: '#ffffff',
-              border: '1px solid #1d4ed8',
-              padding: '6px 12px',
-              borderRadius: '6px',
-              fontWeight: 'bold',
-              fontSize: '12px',
-              cursor: 'pointer'
-            }}
-          >
-            {copiedLink ? '✓ Copied!' : '📋 Copy Overlay Link'}
-          </button>
-
-          <a 
-            href={`/view/${id}`} 
-            target="_blank" 
-            rel="noreferrer"
-            style={{
-              backgroundColor: '#f05a24',
-              color: '#ffffff',
-              padding: '6px 12px',
-              borderRadius: '6px',
-              fontWeight: 'bold',
-              fontSize: '12px',
-              textDecoration: 'none'
-            }}
-          >
-            📺 Open OBS View
-          </a>
-        </div>
-      </header>
-
-      <div className="tab-headers" style={{ display: 'flex' }}>
-        <button className={`tab-btn ${activeTab === 'tab-ops' ? 'active' : ''}`} onClick={() => setActiveTab('tab-ops')}>GAME OPERATIONS</button>
-        <button className={`tab-btn ${activeTab === 'tab-graphics' ? 'active' : ''}`} onClick={() => setActiveTab('tab-graphics')}>GRAPHICS SETTINGS</button>
-        <button className={`tab-btn ${activeTab === 'tab-hotkeys' ? 'active' : ''}`} onClick={() => setActiveTab('tab-hotkeys')}>HOTKEYS</button>
-        <button className={`tab-btn ${activeTab === 'tab-system' ? 'active' : ''}`} onClick={() => setActiveTab('tab-system')}>SYSTEM & PROFILES</button>
+      {/* TAB NAVIGATION HEADERS */}
+      <div className="tab-headers" style={{ display: 'flex', borderBottom: '1px solid ' + themeVars.borderCol }}>
+        <button className={`tab-btn ${activeTab === 'tab-ops' ? 'active' : ''}`} onClick={() => setActiveTab('tab-ops')}>
+          GAME OPERATIONS
+        </button>
+        <button className={`tab-btn ${activeTab === 'tab-graphics' ? 'active' : ''}`} onClick={() => setActiveTab('tab-graphics')}>
+          GRAPHICS SETTINGS
+        </button>
+        <button className={`tab-btn ${activeTab === 'tab-hotkeys' ? 'active' : ''}`} onClick={() => setActiveTab('tab-hotkeys')}>
+          HOTKEYS
+        </button>
+        <button className={`tab-btn ${activeTab === 'tab-system' ? 'active' : ''}`} onClick={() => setActiveTab('tab-system')}>
+          SYSTEM & PROFILES
+        </button>
       </div>
 
       {/* GAME OPS TAB */}
       <div id="tab-ops" className={`tab-content ${activeTab === 'tab-ops' ? 'active' : ''}`}>
         
-        {/* LIVE BROADCAST DISPLAY CARD */}
-        {/* LIVE BROADCAST DISPLAY PREVIEW (MATCHING MOCKUP LAYOUT) */}
+        {/* LIVE BROADCAST DISPLAY CARD PREVIEW */}
         <div className="box" style={{ 
           background: themeVars.bgBox, 
           border: `1px solid ${themeVars.borderCol}`, 
@@ -935,23 +910,53 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             </div>
           </div>
 
-          <div className="box" style={{ flex: '2 1 450px' }}>
-            <h3>TEAM CONTROLS</h3>
-            <div className="row" style={{ background: themeVars.bgInput, padding: '10px', borderRadius: '6px' }}>
+          <div className="box" style={{ 
+            flex: '2 1 450px',
+            padding: '16px', 
+            borderRadius: '8px', 
+            border: `1px solid ${themeVars.borderCol}`,
+            position: 'relative',
+            overflow: 'hidden'
+          }}>
+            {/* Embedded H2H Logo Watermark */}
+            <div style={{
+              position: 'absolute',
+              top: '55%',
+              left: '50%',
+              transform: 'translate(-50%, -50%)',
+              opacity: isLight ? 0.07 : 0.12,
+              pointerEvents: 'none',
+              textAlign: 'center',
+              userSelect: 'none',
+              zIndex: 0
+            }}>
+              <svg width="180" height="150" viewBox="0 0 100 100" fill="none" style={{ margin: '0 auto' }}>
+                <path d="M10 20 L45 5 L45 95 L10 80 Z" fill="#1F50A2" />
+                <path d="M90 20 L55 5 L55 95 L90 80 Z" fill="#FF5100" />
+                <path d="M30 40 L45 40 L45 60 L30 60 Z" fill="#FFFFFF" />
+                <path d="M70 40 L55 40 L55 60 L70 60 Z" fill="#FFFFFF" />
+              </svg>
+              <div style={{ fontSize: '36px', fontWeight: '900', color: themeVars.textColor, marginTop: '2px', letterSpacing: '2px' }}>
+                H2H OVERLAY
+              </div>
+            </div>
+
+            <h3 style={{ fontSize: '14px', fontWeight: 'bold', borderBottom: `1px solid ${themeVars.borderCol}`, paddingBottom: '6px', marginBottom: '16px', zIndex: 1, position: 'relative' }}>TEAM CONTROLS</h3>
+            <div className="row" style={{ background: themeVars.bgInput, padding: '10px', borderRadius: '6px', position: 'relative', zIndex: 1 }}>
               <input type="text" value={state.away_name} onChange={(e) => updateField('away_name', e.target.value)} style={{ maxWidth: '80px', flex: 'none', fontWeight: 'bold' }} />
               <button className="btn btn-secondary-theme" onClick={() => adjStat('away', 'score', 1)}>+ GOAL</button>
               <button className="btn btn-secondary-theme" onClick={() => adjStat('away', 'score', -1)}>-1 G</button>
               <button className="btn btn-secondary-theme" onClick={() => adjStat('away', 'sog', 1)}>+ SOG</button>
               <button className="btn btn-secondary-theme" onClick={() => adjStat('away', 'sog', -1)}>-1 SOG</button>
             </div>
-            <div className="row" style={{ background: themeVars.bgInput, padding: '10px', borderRadius: '6px' }}>
+            <div className="row" style={{ background: themeVars.bgInput, padding: '10px', borderRadius: '6px', position: 'relative', zIndex: 1 }}>
               <input type="text" value={state.home_name} onChange={(e) => updateField('home_name', e.target.value)} style={{ maxWidth: '80px', flex: 'none', fontWeight: 'bold' }} />
               <button className="btn btn-secondary-theme" onClick={() => adjStat('home', 'score', 1)}>+ GOAL</button>
               <button className="btn btn-secondary-theme" onClick={() => adjStat('home', 'score', -1)}>-1 G</button>
               <button className="btn btn-secondary-theme" onClick={() => adjStat('home', 'sog', 1)}>+ SOG</button>
               <button className="btn btn-secondary-theme" onClick={() => adjStat('home', 'sog', -1)}>-1 SOG</button>
             </div>
-            <div className="row">
+            <div className="row" style={{ position: 'relative', zIndex: 1 }}>
               <button className="btn btn-secondary-theme" onClick={() => { updateField('away_score', 0); updateField('away_sog', 0); }}>RESET AWAY STATS</button>
               <button className="btn btn-secondary-theme" onClick={() => { updateField('home_score', 0); updateField('home_sog', 0); }}>RESET HOME STATS</button>
               <button className="btn btn-secondary-theme" onClick={() => { updateField('away_score', 0); updateField('away_sog', 0); updateField('home_score', 0); updateField('home_sog', 0); }}>RESET ALL STATS</button>
@@ -1743,15 +1748,15 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
                 <label style={{ fontSize: '13px', fontWeight: 'bold' }}>Interface Theme:</label>
                 <select 
-                value={currentTheme} 
-                onChange={(e) => updateGraphicVar('uiTheme', e.target.value, true)}
-                style={{ width: '100%', padding: '8px', fontSize: '12px', ...selectStyle }}
-              >
-                <option value="Light" style={selectStyle}>Option 1: Light (#F1F4F8)</option>
-                <option value="Concrete" style={selectStyle}>Option 2: Concrete (#888E99)</option>
-                <option value="Slate" style={selectStyle}>Option 3: Slate (#2F343E)</option>
-                <option value="Studio Black" style={selectStyle}>Option 4: Studio Black (#1C1C1E)</option>
-              </select>
+                  value={currentTheme} 
+                  onChange={(e) => updateGraphicVar('uiTheme', e.target.value, true)}
+                  style={{ width: '100%', padding: '8px', fontSize: '12px', ...selectStyle }}
+                >
+                  <option value="Light" style={selectStyle}>Option 1: Light (#F1F4F8)</option>
+                  <option value="Concrete" style={selectStyle}>Option 2: Concrete (#888E99)</option>
+                  <option value="Slate" style={selectStyle}>Option 3: Slate (#2F343E)</option>
+                  <option value="Studio Black" style={selectStyle}>Option 4: Studio Black (#1C1C1E)</option>
+                </select>
               </div>
             </div>
 
