@@ -23,7 +23,15 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
   const [selectedComp, setSelectedComp] = useState('clock');
   const [listeningKeyFor, setListeningKeyFor] = useState<string | null>(null);
   const [exportFolderHandle, setExportFolderHandle] = useState<FileSystemDirectoryHandle | null>(null);
+  const [exportFolderName, setExportFolderName] = useState<string>('');
+  const [profileEventName, setProfileEventName] = useState<string>('');
   const [copiedLink, setCopiedLink] = useState(false);
+  const [copiedSettings, setCopiedSettings] = useState<any>(null);
+
+  // Undo / Redo History Stack
+  const [historyStack, setHistoryStack] = useState<any[]>([]);
+  const [historyIndex, setHistoryIndex] = useState<number>(-1);
+  const isHistoryAction = useRef(false);
 
   const [autoSaveEnabled, setAutoSaveEnabled] = useState(false);
   const [autoSaveIntervalSec, setAutoSaveIntervalSec] = useState(15);
@@ -56,16 +64,61 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
       const { data, error } = await supabase.from('scoreboards').select('*').eq('id', id).single();
       if (error) console.error("Supabase Error:", error.message);
       if (data) {
-        setState({ 
+        const initialConfig = data.graphics_config || {};
+        const initialState = { 
           ...data, 
           penalties: data.penalties || [],
           shootout_rounds: data.shootout_rounds || Array(10).fill({ away: 0, home: 0 }),
-          graphics_config: data.graphics_config || {}
-        });
+          graphics_config: initialConfig
+        };
+        setState(initialState);
+        setHistoryStack([JSON.parse(JSON.stringify(initialConfig))]);
+        setHistoryIndex(0);
       }
     };
     fetchState();
   }, [id]);
+
+  const pushHistory = (newConfig: any) => {
+    if (isHistoryAction.current) {
+      isHistoryAction.current = false;
+      return;
+    }
+    const cloned = JSON.parse(JSON.stringify(newConfig));
+    setHistoryStack((prev) => {
+      const sliced = prev.slice(0, historyIndex + 1);
+      return [...sliced, cloned];
+    });
+    setHistoryIndex((prev) => prev + 1);
+  };
+
+  const handleUndo = () => {
+    if (historyIndex > 0) {
+      const newIdx = historyIndex - 1;
+      const targetConfig = JSON.parse(JSON.stringify(historyStack[newIdx]));
+      isHistoryAction.current = true;
+      setHistoryIndex(newIdx);
+
+      const updated = { ...state, graphics_config: targetConfig };
+      setState(updated);
+      broadcastState(updated);
+      supabase.from('scoreboards').update({ graphics_config: targetConfig }).eq('id', id);
+    }
+  };
+
+  const handleRedo = () => {
+    if (historyIndex < historyStack.length - 1) {
+      const newIdx = historyIndex + 1;
+      const targetConfig = JSON.parse(JSON.stringify(historyStack[newIdx]));
+      isHistoryAction.current = true;
+      setHistoryIndex(newIdx);
+
+      const updated = { ...state, graphics_config: targetConfig };
+      setState(updated);
+      broadcastState(updated);
+      supabase.from('scoreboards').update({ graphics_config: targetConfig }).eq('id', id);
+    }
+  };
 
   useEffect(() => {
     let autoSaveTimer: NodeJS.Timeout;
@@ -132,13 +185,16 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     });
   };
 
-  const updateGraphicVar = async (key: string, value: any, immediate = false) => {
+  const updateGraphicVar = async (key: string, value: any, immediate = false, skipHistory = false) => {
     setState((prev: any) => {
       if (!prev) return prev;
       const newConfig = { ...(prev.graphics_config || {}), [key]: value };
       const updated = { ...prev, graphics_config: newConfig };
 
       broadcastState(updated);
+      if (!skipHistory) {
+        pushHistory(newConfig);
+      }
 
       if (debounceTimer.current) clearTimeout(debounceTimer.current);
 
@@ -158,13 +214,71 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     return state?.graphics_config?.[key] ?? fallback;
   };
 
-  // UI Theme Palettes from Spec Sheet
+  const copyComponentSettings = () => {
+    const config = state?.graphics_config || {};
+    const settingsToCopy: Record<string, any> = {};
+    const prefix = `${selectedComp}_`;
+
+    Object.keys(config).forEach((key) => {
+      if (key.startsWith(prefix)) {
+        const field = key.replace(prefix, '');
+        settingsToCopy[field] = config[key];
+      }
+    });
+
+    if (selectedComp === 'awayTeam') settingsToCopy['bg_color'] = state?.away_color || config['awayTeam_bg_color'] || '#00468b';
+    if (selectedComp === 'homeTeam') settingsToCopy['bg_color'] = state?.home_color || config['homeTeam_bg_color'] || '#222222';
+
+    setCopiedSettings(settingsToCopy);
+    alert(`Copied graphics settings from [${selectedComp}]!`);
+  };
+
+  const pasteComponentSettings = () => {
+    if (!copiedSettings) {
+      alert('No settings copied yet. Copy settings from an element first!');
+      return;
+    }
+
+    const newConfig = { ...(state?.graphics_config || {}) };
+    let newAwayColor = state?.away_color;
+    let newHomeColor = state?.home_color;
+
+    Object.keys(copiedSettings).forEach((field) => {
+      const fullKey = `${selectedComp}_${field}`;
+      const val = copiedSettings[field];
+      newConfig[fullKey] = val;
+
+      if (field === 'bg_color') {
+        if (selectedComp === 'awayTeam') newAwayColor = val;
+        if (selectedComp === 'homeTeam') newHomeColor = val;
+      }
+    });
+
+    const updated = { 
+      ...state, 
+      away_color: newAwayColor,
+      home_color: newHomeColor,
+      graphics_config: newConfig 
+    };
+
+    setState(updated);
+    broadcastState(updated);
+    pushHistory(newConfig);
+
+    supabase.from('scoreboards').update({ 
+      away_color: newAwayColor,
+      home_color: newHomeColor,
+      graphics_config: newConfig 
+    }).eq('id', id);
+
+    alert(`Pasted settings onto [${selectedComp}]!`);
+  };
+
+  // UI Theme Palettes
   const currentTheme = getGVar('uiTheme', 'Light');
   const isLight = currentTheme === 'Light';
   const isConcrete = currentTheme === 'Concrete';
   const isSlate = currentTheme === 'Slate';
-  const isStudioBlack = currentTheme === 'Studio Black' || currentTheme === 'Default' || currentTheme === 'Studio Dark';
-  const isMedium = isConcrete;
 
   const themeVars = {
     bgPage: isLight ? '#F1F4F8' : isConcrete ? '#888E99' : isSlate ? '#2F343E' : '#1C1C1E',
@@ -182,7 +296,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     btnSecondaryBg: isLight ? '#E1E5E9' : isConcrete ? '#6C737E' : isSlate ? '#535862' : '#2D3238',
     btnSecondaryText: isLight ? '#262A32' : '#FFFFFF',
     btnSecondaryBorder: isLight ? '#B0C4DE' : isConcrete ? '#9AA1AD' : isSlate ? '#A1A1A1' : '#3C3C41',
-    coloredBtnBorder: '1px solid rgba(255,255,255,0.2)'
   };
 
   useEffect(() => {
@@ -420,6 +533,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
         const updated = { ...state, graphics_config: newConfig };
         setState(updated);
         await broadcastState(updated);
+        pushHistory(newConfig);
         await supabase.from('scoreboards').update({ graphics_config: newConfig }).eq('id', id);
       }
 
@@ -441,6 +555,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     const updated = { ...state, graphics_config: newConfig };
     setState(updated);
     await broadcastState(updated);
+    pushHistory(newConfig);
     await supabase.from('scoreboards').update({ graphics_config: newConfig }).eq('id', id);
   };
 
@@ -449,6 +564,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
       try {
         const handle = await (window as any).showDirectoryPicker();
         setExportFolderHandle(handle);
+        setExportFolderName(handle.name);
       } catch (err) {
         console.warn("Folder selection canceled or unsupported:", err);
       }
@@ -457,14 +573,25 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     }
   };
 
+  const clearExportFolder = () => {
+    setExportFolderHandle(null);
+    setExportFolderName('');
+  };
+
   const exportProfileJSON = async () => {
+    const customName = profileEventName.trim() 
+      ? profileEventName.trim().replace(/[^a-zA-Z0-9_-]/g, '_')
+      : `${state.away_name}_vs_${state.home_name}`;
+
     const exportData = {
+      profile_title: profileEventName.trim() || customName,
       scoreboard: state,
       graphics_config: state.graphics_config || {},
       exported_at: new Date().toISOString()
     };
+    
     const jsonStr = JSON.stringify(exportData, null, 2);
-    const fileName = `Scoreboard_Profile_${state.away_name}_vs_${state.home_name}_${Date.now()}.json`;
+    const fileName = `Scoreboard_Profile_${customName}_${Date.now()}.json`;
 
     if (exportFolderHandle) {
       try {
@@ -472,7 +599,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
         const writable = await fileHandle.createWritable();
         await writable.write(jsonStr);
         await writable.close();
-        alert(`Profile exported successfully to folder: ${fileName}`);
+        alert(`Profile exported successfully as "${fileName}" to folder [${exportFolderName}]!`);
         return;
       } catch (err) {
         console.error("Failed to write to folder handle:", err);
@@ -504,8 +631,13 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
           graphics_config: importedConfig
         };
 
+        if (parsed.profile_title) {
+          setProfileEventName(parsed.profile_title);
+        }
+
         setState(newScoreboardState);
         await broadcastState(newScoreboardState);
+        pushHistory(importedConfig);
         await supabase.from('scoreboards').update(newScoreboardState).eq('id', id);
         alert("Profile imported and synchronized successfully!");
       } catch (err) {
@@ -535,6 +667,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     const restoredState = { ...parsed, id: id };
     setState(restoredState);
     await broadcastState(restoredState);
+    pushHistory(restoredState.graphics_config || {});
     await supabase.from('scoreboards').update(restoredState).eq('id', id);
     alert("Restored User Default profile successfully.");
   };
@@ -561,6 +694,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     const updated = { ...state, ...defaultData };
     setState(updated);
     await broadcastState(updated);
+    pushHistory(cleanConfig);
     await supabase.from('scoreboards').update(defaultData).eq('id', id);
     alert("Scoreboard reset to factory defaults.");
   };
@@ -584,7 +718,12 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
   const currentImgAlpha = getGVar(`${selectedComp}_img_alpha`, '100');
   const currentImgX = getGVar(`${selectedComp}_img_x`, '0');
   const currentImgY = getGVar(`${selectedComp}_img_y`, '0');
-  const currentRevSkew = getGVar(`${selectedComp}_rev_skew`, false);
+  
+  // Media Global Skew
+  const mediaUseGlobalSkew = getGVar(`${selectedComp}_use_global_skew`, false);
+  const globalSkewVal = getGVar('skewAngle', '0');
+  const mediaComputedSkew = mediaUseGlobalSkew ? globalSkewVal : '0';
+
   const chromaActive = getGVar('chromaKeyActive', false);
 
   const selectStyle: React.CSSProperties = {
@@ -647,7 +786,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
         #control-panel .box h3, #control-panel .box label { color: ${themeVars.headerTextCol} !important; }
         #control-panel input, #control-panel select { background-color: ${themeVars.bgInput} !important; color: ${themeVars.textColor} !important; border-color: ${themeVars.borderCol} !important; }
         #control-panel .tab-headers { background-color: ${themeVars.tabHeaderBg} !important; border-bottom-color: ${themeVars.borderCol} !important; }
-        #control-panel .tab-btn { color: ${themeVars.tabInactiveText} !important; font-weight: bold; }
+        #control-panel .tab-btn { color: ${themeVars.tabInactiveText} !important; font-weight: bold; border: none; padding: 12px 20px; cursor: pointer; transition: background 0.15s ease; }
+        #control-panel .tab-btn:hover:not(.active) { background-color: ${isLight ? '#c9cfd8' : '#3a404a'} !important; color: ${isLight ? '#1c2431' : '#ffffff'} !important; }
         #control-panel .tab-btn.active { background-color: ${themeVars.tabActiveBg} !important; color: ${themeVars.tabActiveText} !important; border-bottom: 3px solid #FF5100; }
         
         #control-panel .btn {
@@ -675,7 +815,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
         }
       `}</style>
 
-      {/* BRANDING HEADER BAR WITH CAPSULE PILL LOGO */}
+      {/* BRANDING HEADER BAR WITH CAPSULE PILL LOGO - USES DIRECT TRANSPARENT BRAND IMAGE */}
       <header style={{
         backgroundColor: themeVars.bgHeader,
         borderBottom: `3px solid ${themeVars.borderCol}`,
@@ -691,21 +831,19 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             alignItems: 'center', 
             gap: '10px', 
             background: '#FFFFFF', 
-            border: '2px solid #1F50A2', 
+            border: '2px solid #104085', 
             borderRadius: '24px', 
             padding: '5px 18px',
             boxShadow: '0 2px 6px rgba(0,0,0,0.1)'
           }}>
-            <svg width="24" height="24" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path d="M10 20 L45 5 L45 95 L10 80 Z" fill="#1F50A2" />
-              <path d="M90 20 L55 5 L55 95 L90 80 Z" fill="#FF5100" />
-              <path d="M30 40 L45 40 L45 60 L30 60 Z" fill="#FFFFFF" />
-              <path d="M70 40 L55 40 L55 60 L70 60 Z" fill="#FFFFFF" />
-              <polygon points="40,50 60,50 50,45" fill="#1F50A2" />
-              <polygon points="40,50 60,50 50,55" fill="#FF5100" />
-            </svg>
-            <span style={{ fontWeight: '900', fontSize: '16px', color: '#1F50A2', letterSpacing: '0.5px' }}>
-              H2H <span style={{ color: '#FF5100' }}>OVERLAY</span>
+            {/* Direct Official Brand Icon PNG */}
+            <img 
+              src="/brand/h2h-logo-icon.png" 
+              alt="H2H Emblem" 
+              style={{ height: '28px', width: 'auto', objectFit: 'contain' }}
+            />
+            <span style={{ fontWeight: '900', fontSize: '16px', color: '#104085', letterSpacing: '0.5px' }}>
+              H2H <span style={{ color: '#F36C21' }}>OVERLAY</span>
             </span>
           </div>
 
@@ -729,7 +867,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
           <button 
             onClick={copyOverlayLink}
             style={{
-              backgroundColor: '#1F50A2',
+              backgroundColor: '#104085',
               color: '#ffffff',
               border: 'none',
               padding: '8px 16px',
@@ -747,7 +885,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             target="_blank" 
             rel="noreferrer"
             style={{
-              backgroundColor: '#FF5100',
+              backgroundColor: '#F36C21',
               color: '#ffffff',
               padding: '8px 16px',
               borderRadius: '6px',
@@ -780,13 +918,14 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
       {/* GAME OPS TAB */}
       <div id="tab-ops" className={`tab-content ${activeTab === 'tab-ops' ? 'active' : ''}`}>
         
-        {/* LIVE BROADCAST DISPLAY CARD PREVIEW */}
+        {/* LIVE BROADCAST DISPLAY PREVIEW - PENALTIES POSITIONED TO THE LEFT AND RIGHT OF TEAMS */}
         <div className="box" style={{ 
           background: themeVars.bgBox, 
           border: `1px solid ${themeVars.borderCol}`, 
           padding: '12px 16px', 
           borderRadius: '8px', 
-          marginBottom: '20px' 
+          marginBottom: '20px',
+          overflow: 'hidden'
         }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
             <span style={{ fontSize: '11px', color: themeVars.textColor, fontWeight: 'bold', letterSpacing: '0.5px' }}>
@@ -797,26 +936,58 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             </span>
           </div>
 
-          {/* Sleek Inset Recessed Groove */}
           <div style={{ 
             background: isLight ? '#D5DCE2' : '#141820', 
-            borderRadius: '6px', 
-            padding: '10px 24px', 
+            borderRadius: '8px', 
+            padding: '15px 24px', 
             display: 'flex', 
             alignItems: 'center', 
             justifyContent: 'center',
-            gap: '30px',
+            gap: '24px',
             border: `1px solid ${isLight ? '#BCC5CE' : '#0A0D12'}`,
-            boxShadow: 'inset 0 2px 6px rgba(0,0,0,0.3)'
+            boxShadow: 'inset 0 2px 6px rgba(0,0,0,0.3)',
+            overflow: 'hidden'
           }}>
             
-            {/* AWAY TEAM */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <div style={{ textAlign: 'right' }}>
-                <div style={{ fontSize: '13px', fontWeight: '900', color: themeVars.textColor }}>{state.away_name || 'AWAY'}</div>
-                <div style={{ fontSize: '10px', color: themeVars.textMuted }}>SOG:{state.away_sog}</div>
+            {/* AWAY TEAM BLOCK WITH LEFT PENALTIES */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
+              
+              {/* Away Penalties (Left of Logo) */}
+              {(state.penalties || []).filter((p: Penalty) => p.team === 'away').length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', width: '140px', flex: 'none' }}>
+                  {(state.penalties || []).filter((p: Penalty) => p.team === 'away').map((p: Penalty) => (
+                    <div key={p.id} style={{ background: state.away_color || '#00468b', color: '#ffffff', padding: '5px 12px', borderRadius: '4px', fontSize: '11px', fontWeight: '900', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span>#{p.plyr}</span><span>{formatTime(p.time)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Away Logo */}
+              <div style={{ width: '60px', height: '60px', position: 'relative', flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+                {getGVar('awayTeam_media_url') && (
+                  <img 
+                    src={getGVar('awayTeam_media_url')} 
+                    alt="" 
+                    style={{ width: '100%', height: '100%', objectFit: 'contain', opacity: 1, transform: 'translate(0%, 0%) scale(1)' }}
+                  />
+                )}
               </div>
-              <div style={{ borderRight: '3px solid #1F50A2', height: '24px', margin: '0 4px' }} />
+
+              {/* Away Name & SOG */}
+              <div style={{ textAlign: 'right' }}>
+                <div style={{ fontSize: '15px', fontWeight: '900', color: themeVars.textColor, lineHeight: '1.2' }}>
+                  {state.away_name || 'AWAY'}
+                </div>
+                <div style={{ fontSize: '10px', fontWeight: 'bold', color: themeVars.textMuted, marginTop: '2px' }}>
+                  SOG:{state.away_sog}
+                </div>
+              </div>
+
+              {/* Away Color Pill */}
+              <div style={{ width: '8px', height: '28px', backgroundColor: state.away_color || '#00468b', borderRadius: '10px', flex: 'none' }} />
+
+              {/* Away Score */}
               <div style={{ fontSize: '32px', fontWeight: '900', color: themeVars.textColor, minWidth: '24px', textAlign: 'center' }}>
                 {state.away_score}
               </div>
@@ -828,10 +999,10 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                 fontSize: '28px', 
                 fontWeight: '900', 
                 fontFamily: 'monospace', 
-                background: '#090C12',
+                background: '#161922',
                 color: '#FFFFFF',
-                padding: '2px 16px',
-                borderRadius: '4px',
+                padding: '4px 18px',
+                borderRadius: '6px',
                 border: '1px solid #2B3240',
                 letterSpacing: '1px'
               }}>
@@ -842,16 +1013,47 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
               </span>
             </div>
 
-            {/* HOME TEAM */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            {/* HOME TEAM BLOCK WITH RIGHT PENALTIES */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
+              {/* Home Score */}
               <div style={{ fontSize: '32px', fontWeight: '900', color: themeVars.textColor, minWidth: '24px', textAlign: 'center' }}>
                 {state.home_score}
               </div>
-              <div style={{ borderLeft: '3px solid #FF5100', height: '24px', margin: '0 4px' }} />
+
+              {/* Home Color Pill */}
+              <div style={{ width: '8px', height: '28px', backgroundColor: state.home_color || '#222222', borderRadius: '10px', flex: 'none' }} />
+
+              {/* Home Name & SOG */}
               <div style={{ textAlign: 'left' }}>
-                <div style={{ fontSize: '13px', fontWeight: '900', color: themeVars.textColor }}>{state.home_name || 'HOME'}</div>
-                <div style={{ fontSize: '10px', color: themeVars.textMuted }}>SOG:{state.home_sog}</div>
+                <div style={{ fontSize: '15px', fontWeight: '900', color: themeVars.textColor, lineHeight: '1.2' }}>
+                  {state.home_name || 'HOME'}
+                </div>
+                <div style={{ fontSize: '10px', fontWeight: 'bold', color: themeVars.textMuted, marginTop: '2px' }}>
+                  SOG:{state.home_sog}
+                </div>
               </div>
+
+              {/* Home Logo */}
+              <div style={{ width: '60px', height: '60px', position: 'relative', flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+                {getGVar('homeTeam_media_url') && (
+                  <img 
+                    src={getGVar('homeTeam_media_url')} 
+                    alt="" 
+                    style={{ width: '100%', height: '100%', objectFit: 'contain', opacity: 1, transform: 'translate(0%, 0%) scale(1)' }}
+                  />
+                )}
+              </div>
+
+              {/* Home Penalties (Right of Logo) */}
+              {(state.penalties || []).filter((p: Penalty) => p.team === 'home').length > 0 && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', width: '140px', flex: 'none' }}>
+                  {(state.penalties || []).filter((p: Penalty) => p.team === 'home').map((p: Penalty) => (
+                    <div key={p.id} style={{ background: state.home_color || '#222222', color: '#ffffff', padding: '5px 12px', borderRadius: '4px', fontSize: '11px', fontWeight: '900', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span>#{p.plyr}</span><span>{formatTime(p.time)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
           </div>
@@ -918,27 +1120,23 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             position: 'relative',
             overflow: 'hidden'
           }}>
-            {/* Embedded H2H Logo Watermark */}
+            {/* OFFICIAL DIRECT BRAND IMAGE WATERMARK */}
             <div style={{
               position: 'absolute',
               top: '55%',
               left: '50%',
               transform: 'translate(-50%, -50%)',
-              opacity: isLight ? 0.07 : 0.12,
+              opacity: isLight ? 0.08 : 0.14,
               pointerEvents: 'none',
               textAlign: 'center',
               userSelect: 'none',
               zIndex: 0
             }}>
-              <svg width="180" height="150" viewBox="0 0 100 100" fill="none" style={{ margin: '0 auto' }}>
-                <path d="M10 20 L45 5 L45 95 L10 80 Z" fill="#1F50A2" />
-                <path d="M90 20 L55 5 L55 95 L90 80 Z" fill="#FF5100" />
-                <path d="M30 40 L45 40 L45 60 L30 60 Z" fill="#FFFFFF" />
-                <path d="M70 40 L55 40 L55 60 L70 60 Z" fill="#FFFFFF" />
-              </svg>
-              <div style={{ fontSize: '36px', fontWeight: '900', color: themeVars.textColor, marginTop: '2px', letterSpacing: '2px' }}>
-                H2H OVERLAY
-              </div>
+              <img 
+                src="/brand/h2h-logo-full.png" 
+                alt="H2H Overlay Watermark" 
+                style={{ width: '220px', height: 'auto', objectFit: 'contain', margin: '0 auto' }}
+              />
             </div>
 
             <h3 style={{ fontSize: '14px', fontWeight: 'bold', borderBottom: `1px solid ${themeVars.borderCol}`, paddingBottom: '6px', marginBottom: '16px', zIndex: 1, position: 'relative' }}>TEAM CONTROLS</h3>
@@ -1078,7 +1276,9 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
               <input 
                 type="range" min="0.5" max="1.5" step="0.05" 
                 value={getGVar('bugScale', '1.0')} 
-                onChange={(e) => updateGraphicVar('bugScale', e.target.value)} 
+                onChange={(e) => updateGraphicVar('bugScale', e.target.value, false, true)} 
+                onMouseUp={() => pushHistory(state?.graphics_config)}
+                onTouchEnd={() => pushHistory(state?.graphics_config)}
               />
             </div>
 
@@ -1087,13 +1287,15 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
               <div className="sync-group">
                 <input 
                   type="range" min="-30" max="30" 
-                  value={getGVar('skewAngle', '0')} 
-                  onChange={(e) => updateGraphicVar('skewAngle', e.target.value)} 
+                  value={globalSkewVal} 
+                  onChange={(e) => updateGraphicVar('skewAngle', e.target.value, true, true)} 
+                  onMouseUp={() => pushHistory(state?.graphics_config)}
+                  onTouchEnd={() => pushHistory(state?.graphics_config)}
                 />
                 <input 
                   type="number" className="sync-num" 
-                  value={getGVar('skewAngle', '0')} 
-                  onChange={(e) => updateGraphicVar('skewAngle', e.target.value)} 
+                  value={globalSkewVal} 
+                  onChange={(e) => updateGraphicVar('skewAngle', e.target.value, true)} 
                   style={{ width: '55px' }}
                 />
               </div>
@@ -1105,7 +1307,9 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                 <input 
                   type="range" min="0" max="40" 
                   value={getGVar('cornerRadius', '8')} 
-                  onChange={(e) => updateGraphicVar('cornerRadius', e.target.value)} 
+                  onChange={(e) => updateGraphicVar('cornerRadius', e.target.value, false, true)} 
+                  onMouseUp={() => pushHistory(state?.graphics_config)}
+                  onTouchEnd={() => pushHistory(state?.graphics_config)}
                 />
                 <input 
                   type="number" className="sync-num" 
@@ -1118,24 +1322,24 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
 
             <div className="row">
               <label>Bug Border:</label>
-              <div className="sync-group">
+              <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                 <input 
                   type="color" 
                   value={getGVar('bugBorderColor', '#ffffff')} 
                   onChange={(e) => updateGraphicVar('bugBorderColor', e.target.value, true)} 
-                  style={{ width: '32px', height: '32px', padding: 0, cursor: 'pointer' }}
+                  style={{ width: '32px', height: '32px', padding: 0, cursor: 'pointer', border: 'none', borderRadius: '4px' }}
                 />
                 <input 
                   type="text" 
                   value={getGVar('bugBorderColor', '#ffffff')} 
                   onChange={(e) => updateGraphicVar('bugBorderColor', e.target.value, true)} 
-                  style={{ width: '75px', textAlign: 'center', fontFamily: 'monospace' }} 
+                  style={{ width: '85px', height: '32px', textAlign: 'center', fontFamily: 'monospace', padding: '4px' }} 
                 />
                 <input 
                   type="number" min="0" max="15" 
                   value={getGVar('bugBorderWidth', '2')} 
                   onChange={(e) => updateGraphicVar('bugBorderWidth', e.target.value)} 
-                  style={{ width: '50px' }} 
+                  style={{ width: '50px', height: '32px', textAlign: 'center' }} 
                 /> px
               </div>
             </div>
@@ -1179,16 +1383,67 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             </div>
           </div>
 
-          {/* COMPONENT EDITOR - WITH SHOOTOUT TRACKER INCLUDED */}
+          {/* COMPONENT EDITOR */}
           <div className="box" style={{ flex: '2 1 600px', borderColor: '#007bff' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #007bff', paddingBottom: '10px', marginBottom: '15px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #007bff', paddingBottom: '10px', marginBottom: '15px', flexWrap: 'wrap', gap: '10px' }}>
               <h3 style={{ border: 'none', margin: 0, padding: 0 }}>COMPONENT EDITOR</h3>
+              
               <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <label style={{ width: 'auto', fontSize: '13px' }}>Select Element:</label>
+                <button 
+                  onClick={handleUndo}
+                  disabled={historyIndex <= 0}
+                  style={{ 
+                    background: historyIndex > 0 ? '#ff9800' : themeVars.btnSecondaryBg, 
+                    color: historyIndex > 0 ? '#fff' : themeVars.textMuted, 
+                    border: `1px solid ${themeVars.btnSecondaryBorder}`, 
+                    borderRadius: '4px', 
+                    padding: '6px 10px', 
+                    fontSize: '11px', 
+                    fontWeight: 'bold', 
+                    cursor: historyIndex > 0 ? 'pointer' : 'not-allowed',
+                    opacity: historyIndex > 0 ? 1 : 0.5 
+                  }}
+                >
+                  ↩ UNDO
+                </button>
+
+                <button 
+                  onClick={handleRedo}
+                  disabled={historyIndex >= historyStack.length - 1}
+                  style={{ 
+                    background: historyIndex < historyStack.length - 1 ? '#ff9800' : themeVars.btnSecondaryBg, 
+                    color: historyIndex < historyStack.length - 1 ? '#fff' : themeVars.textMuted, 
+                    border: `1px solid ${themeVars.btnSecondaryBorder}`, 
+                    borderRadius: '4px', 
+                    padding: '6px 10px', 
+                    fontSize: '11px', 
+                    fontWeight: 'bold', 
+                    cursor: historyIndex < historyStack.length - 1 ? 'pointer' : 'not-allowed',
+                    opacity: historyIndex < historyStack.length - 1 ? 1 : 0.5 
+                  }}
+                >
+                  ↪ REDO
+                </button>
+
+                <button 
+                  onClick={copyComponentSettings}
+                  style={{ background: '#2860bd', color: '#fff', border: 'none', borderRadius: '4px', padding: '6px 12px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
+                >
+                  📋 COPY SETTINGS
+                </button>
+
+                <button 
+                  onClick={pasteComponentSettings}
+                  style={{ background: copiedSettings ? '#10b981' : themeVars.btnSecondaryBg, color: copiedSettings ? '#fff' : themeVars.btnSecondaryText, border: `1px solid ${themeVars.btnSecondaryBorder}`, borderRadius: '4px', padding: '6px 12px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
+                >
+                  📥 PASTE SETTINGS
+                </button>
+                
+                <label style={{ width: 'auto', fontSize: '13px', marginLeft: '6px' }}>Select Element:</label>
                 <select 
                   value={selectedComp} 
                   onChange={(e) => setSelectedComp(e.target.value)}
-                  style={{ width: '200px', flex: 'none', fontWeight: 'bold', ...selectStyle }}
+                  style={{ width: '180px', flex: 'none', fontWeight: 'bold', ...selectStyle }}
                 >
                   <option value="clock" style={selectStyle}>Game Clock</option>
                   <option value="period" style={selectStyle}>Period</option>
@@ -1212,60 +1467,65 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap' }}>
               
               <div style={{ flex: '1 1 250px' }}>
-                <div className="row">
+                
+                {/* TEXT COLOR ROW */}
+                <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                   <label>Text Color:</label>
-                  <div className="sync-group">
+                  <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <input 
                       type="color" 
                       value={getGVar(`${selectedComp}_text_color`, '#ffffff')} 
                       onChange={(e) => updateGraphicVar(`${selectedComp}_text_color`, e.target.value, true)} 
-                      style={{ width: '32px', height: '32px', padding: 0, cursor: 'pointer' }}
+                      style={{ width: '32px', height: '32px', padding: 0, cursor: 'pointer', border: 'none', borderRadius: '4px' }}
                     />
                     <input 
                       type="text" 
                       value={getGVar(`${selectedComp}_text_color`, '#ffffff')} 
                       onChange={(e) => updateGraphicVar(`${selectedComp}_text_color`, e.target.value, true)} 
-                      style={{ width: '75px', fontFamily: 'monospace' }}
+                      style={{ width: '85px', height: '32px', fontFamily: 'monospace', textAlign: 'center', padding: '4px' }}
                     />
                   </div>
                 </div>
 
-                <div className="row">
+                {/* TEXT OUTLINE ROW */}
+                <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                   <label>Text Outline Color:</label>
-                  <div className="sync-group">
+                  <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <input 
                       type="color" 
                       value={getGVar(`${selectedComp}_stroke_color`, '#000000')} 
                       onChange={(e) => updateGraphicVar(`${selectedComp}_stroke_color`, e.target.value, true)} 
-                      style={{ width: '32px', height: '32px', padding: 0, cursor: 'pointer' }}
+                      style={{ width: '32px', height: '32px', padding: 0, cursor: 'pointer', border: 'none', borderRadius: '4px' }}
                     />
                     <input 
                       type="text" 
                       value={getGVar(`${selectedComp}_stroke_color`, '#000000')} 
                       onChange={(e) => updateGraphicVar(`${selectedComp}_stroke_color`, e.target.value, true)} 
-                      style={{ width: '75px', fontFamily: 'monospace' }}
+                      style={{ width: '85px', height: '32px', fontFamily: 'monospace', textAlign: 'center', padding: '4px' }}
                     />
                   </div>
                 </div>
 
-                <div className="row">
+                <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                   <label>Text Outline (px):</label>
-                  <div className="sync-group">
+                  <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <input 
                       type="range" min="0" max="20" 
                       value={getGVar(`${selectedComp}_stroke_width`, '0')} 
-                      onChange={(e) => updateGraphicVar(`${selectedComp}_stroke_width`, e.target.value)} 
+                      onChange={(e) => updateGraphicVar(`${selectedComp}_stroke_width`, e.target.value, false, true)} 
+                      onMouseUp={() => pushHistory(state?.graphics_config)}
+                      onTouchEnd={() => pushHistory(state?.graphics_config)}
                     />
                     <input 
                       type="number" className="sync-num" 
                       value={getGVar(`${selectedComp}_stroke_width`, '0')} 
                       onChange={(e) => updateGraphicVar(`${selectedComp}_stroke_width`, e.target.value)} 
-                      style={{ width: '55px' }}
+                      style={{ width: '55px', height: '32px', textAlign: 'center' }}
                     />
                   </div>
                 </div>
 
-                <div className="row">
+                <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                   <label>Font Family:</label>
                   <select 
                     value={getGVar(`${selectedComp}_font_family`, '')} 
@@ -1284,41 +1544,48 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                   </select>
                 </div>
 
-                <div className="row">
+                <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                   <label>Font Size (px):</label>
-                  <div className="sync-group">
+                  <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <input 
                       type="range" min="8" max="150" 
                       value={getGVar(`${selectedComp}_font_size`, '24')} 
-                      onChange={(e) => updateGraphicVar(`${selectedComp}_font_size`, e.target.value)} 
+                      onChange={(e) => updateGraphicVar(`${selectedComp}_font_size`, e.target.value, false, true)} 
+                      onMouseUp={() => pushHistory(state?.graphics_config)}
+                      onTouchEnd={() => pushHistory(state?.graphics_config)}
                     />
                     <input 
                       type="number" className="sync-num" 
                       value={getGVar(`${selectedComp}_font_size`, '24')} 
                       onChange={(e) => updateGraphicVar(`${selectedComp}_font_size`, e.target.value)} 
-                      style={{ width: '55px' }}
+                      style={{ width: '55px', height: '32px', textAlign: 'center' }}
                     />
                   </div>
                 </div>
 
-                <div className="row">
+                {/* TEXT SKEW */}
+                <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                   <label>Text Skew °:</label>
-                  <div className="sync-group">
+                  <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <input 
                       type="range" min="-40" max="40" 
-                      value={getGVar(`${selectedComp}_text_skew`, '0')} 
-                      onChange={(e) => updateGraphicVar(`${selectedComp}_text_skew`, e.target.value)} 
+                      value={getGVar(`${selectedComp}_text_global_skew`, false) ? globalSkewVal : getGVar(`${selectedComp}_text_skew`, '0')} 
+                      disabled={getGVar(`${selectedComp}_text_global_skew`, false)}
+                      onChange={(e) => updateGraphicVar(`${selectedComp}_text_skew`, e.target.value, false, true)} 
+                      onMouseUp={() => pushHistory(state?.graphics_config)}
+                      onTouchEnd={() => pushHistory(state?.graphics_config)}
                     />
                     <input 
                       type="number" className="sync-num" 
-                      value={getGVar(`${selectedComp}_text_skew`, '0')} 
+                      value={getGVar(`${selectedComp}_text_global_skew`, false) ? globalSkewVal : getGVar(`${selectedComp}_text_skew`, '0')} 
+                      disabled={getGVar(`${selectedComp}_text_global_skew`, false)}
                       onChange={(e) => updateGraphicVar(`${selectedComp}_text_skew`, e.target.value)} 
-                      style={{ width: '55px' }}
+                      style={{ width: '55px', height: '32px', textAlign: 'center' }}
                     />
                   </div>
                 </div>
 
-                <div className="row">
+                <div className="row" style={{ display: 'flex', alignItems: 'center', marginBottom: '10px' }}>
                   <label></label>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <input 
@@ -1327,50 +1594,53 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                       onChange={(e) => updateGraphicVar(`${selectedComp}_text_global_skew`, e.target.checked, true)} 
                       style={{ flex: 'none' }} 
                     /> 
-                    <span style={{ fontSize: '11px' }}>Use Global Box Angle</span>
+                    <span style={{ fontSize: '11px' }}>Use Global Box Angle ({globalSkewVal}°)</span>
                   </div>
                 </div>
 
                 <hr style={{ borderColor: themeVars.borderCol, margin: '15px 0' }} />
 
-                <div className="row">
+                {/* BORDER COLOR ROW */}
+                <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                   <label>Border Color:</label>
-                  <div className="sync-group">
+                  <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <input 
                       type="color" 
                       value={getGVar(`${selectedComp}_border_color`, '#ffffff')} 
                       onChange={(e) => updateGraphicVar(`${selectedComp}_border_color`, e.target.value, true)} 
-                      style={{ width: '32px', height: '32px', padding: 0, cursor: 'pointer' }}
+                      style={{ width: '32px', height: '32px', padding: 0, cursor: 'pointer', border: 'none', borderRadius: '4px' }}
                     />
                     <input 
                       type="text" 
                       value={getGVar(`${selectedComp}_border_color`, '#ffffff')} 
                       onChange={(e) => updateGraphicVar(`${selectedComp}_border_color`, e.target.value, true)} 
-                      style={{ width: '75px', fontFamily: 'monospace' }}
+                      style={{ width: '85px', height: '32px', fontFamily: 'monospace', textAlign: 'center', padding: '4px' }}
                     />
                   </div>
                 </div>
 
-                <div className="row">
+                <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                   <label>Border Width (px):</label>
-                  <div className="sync-group">
+                  <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <input 
                       type="range" min="0" max="20" 
                       value={getGVar(`${selectedComp}_border_width`, '0')} 
-                      onChange={(e) => updateGraphicVar(`${selectedComp}_border_width`, e.target.value)} 
+                      onChange={(e) => updateGraphicVar(`${selectedComp}_border_width`, e.target.value, false, true)} 
+                      onMouseUp={() => pushHistory(state?.graphics_config)}
+                      onTouchEnd={() => pushHistory(state?.graphics_config)}
                     />
                     <input 
                       type="number" className="sync-num" 
                       value={getGVar(`${selectedComp}_border_width`, '0')} 
                       onChange={(e) => updateGraphicVar(`${selectedComp}_border_width`, e.target.value)} 
-                      style={{ width: '55px' }}
+                      style={{ width: '55px', height: '32px', textAlign: 'center' }}
                     />
                   </div>
                 </div>
 
                 <hr style={{ borderColor: themeVars.borderCol, margin: '15px 0' }} />
 
-                <div className="row">
+                <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                   <label>Background Type:</label>
                   <select 
                     value={bgType} 
@@ -1386,9 +1656,9 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                 </div>
 
                 {bgType !== 'clear' && (
-                  <div className="row">
+                  <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                     <label>BG Color 1 (Left):</label>
-                    <div className="sync-group">
+                    <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                       <input 
                         type="color" 
                         value={
@@ -1402,7 +1672,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                           else if (selectedComp === 'homeTeam') updateField('home_color', val);
                           else updateGraphicVar(`${selectedComp}_bg_color`, val, true);
                         }} 
-                        style={{ width: '32px', height: '32px', padding: 0, cursor: 'pointer' }}
+                        style={{ width: '32px', height: '32px', padding: 0, cursor: 'pointer', border: 'none', borderRadius: '4px' }}
                       />
                       <input 
                         type="text" 
@@ -1417,7 +1687,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                           else if (selectedComp === 'homeTeam') updateField('home_color', val);
                           else updateGraphicVar(`${selectedComp}_bg_color`, val, true);
                         }} 
-                        style={{ width: '75px', fontFamily: 'monospace' }}
+                        style={{ width: '85px', height: '32px', fontFamily: 'monospace', textAlign: 'center', padding: '4px' }}
                       />
                     </div>
                   </div>
@@ -1425,54 +1695,58 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
 
                 {bgType === 'linear3' && (
                   <>
-                    <div className="row">
+                    <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                       <label>BG Color 2 (Mid):</label>
-                      <div className="sync-group">
+                      <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                         <input 
                           type="color" 
                           value={getGVar(`${selectedComp}_bg_col3`, '#888888')} 
                           onChange={(e) => updateGraphicVar(`${selectedComp}_bg_col3`, e.target.value, true)} 
-                          style={{ width: '32px', height: '32px', padding: 0, cursor: 'pointer' }}
+                          style={{ width: '32px', height: '32px', padding: 0, cursor: 'pointer', border: 'none', borderRadius: '4px' }}
                         />
                         <input 
                           type="text" 
                           value={getGVar(`${selectedComp}_bg_col3`, '#888888')} 
                           onChange={(e) => updateGraphicVar(`${selectedComp}_bg_col3`, e.target.value, true)} 
-                          style={{ width: '75px', fontFamily: 'monospace' }}
+                          style={{ width: '85px', height: '32px', fontFamily: 'monospace', textAlign: 'center', padding: '4px' }}
                         />
                       </div>
                     </div>
 
-                    <div className="row">
+                    <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                       <label>Mid Position %:</label>
-                      <div className="sync-group">
+                      <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                         <input 
                           type="range" min="0" max="100" 
                           value={getGVar(`${selectedComp}_mid_pos`, '50')} 
-                          onChange={(e) => updateGraphicVar(`${selectedComp}_mid_pos`, e.target.value)} 
+                          onChange={(e) => updateGraphicVar(`${selectedComp}_mid_pos`, e.target.value, false, true)} 
+                          onMouseUp={() => pushHistory(state?.graphics_config)}
+                          onTouchEnd={() => pushHistory(state?.graphics_config)}
                         />
                         <input 
                           type="number" className="sync-num" 
                           value={getGVar(`${selectedComp}_mid_pos`, '50')} 
                           onChange={(e) => updateGraphicVar(`${selectedComp}_mid_pos`, e.target.value)} 
-                          style={{ width: '55px' }}
+                          style={{ width: '55px', height: '32px', textAlign: 'center' }}
                         />
                       </div>
                     </div>
 
-                    <div className="row">
+                    <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                       <label>Mid Width %:</label>
-                      <div className="sync-group">
+                      <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                         <input 
                           type="range" min="0" max="100" 
                           value={getGVar(`${selectedComp}_mid_width`, '0')} 
-                          onChange={(e) => updateGraphicVar(`${selectedComp}_mid_width`, e.target.value)} 
+                          onChange={(e) => updateGraphicVar(`${selectedComp}_mid_width`, e.target.value, false, true)} 
+                          onMouseUp={() => pushHistory(state?.graphics_config)}
+                          onTouchEnd={() => pushHistory(state?.graphics_config)}
                         />
                         <input 
                           type="number" className="sync-num" 
                           value={getGVar(`${selectedComp}_mid_width`, '0')} 
                           onChange={(e) => updateGraphicVar(`${selectedComp}_mid_width`, e.target.value)} 
-                          style={{ width: '55px' }}
+                          style={{ width: '55px', height: '32px', textAlign: 'center' }}
                         />
                       </div>
                     </div>
@@ -1480,64 +1754,69 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                 )}
 
                 {(bgType === 'linear' || bgType === 'linear3' || bgType === 'radial') && (
-                  <div className="row">
+                  <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                     <label>{bgType === 'linear3' ? 'BG Color 3 (Right):' : 'BG Color 2 (Right):'}</label>
-                    <div className="sync-group">
+                    <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                       <input 
                         type="color" 
                         value={getGVar(`${selectedComp}_bg_col2`, '#000000')} 
                         onChange={(e) => updateGraphicVar(`${selectedComp}_bg_col2`, e.target.value, true)} 
-                        style={{ width: '32px', height: '32px', padding: 0, cursor: 'pointer' }}
+                        style={{ width: '32px', height: '32px', padding: 0, cursor: 'pointer', border: 'none', borderRadius: '4px' }}
                       />
                       <input 
                         type="text" 
                         value={getGVar(`${selectedComp}_bg_col2`, '#000000')} 
                         onChange={(e) => updateGraphicVar(`${selectedComp}_bg_col2`, e.target.value, true)} 
-                        style={{ width: '75px', fontFamily: 'monospace' }}
+                        style={{ width: '85px', height: '32px', fontFamily: 'monospace', textAlign: 'center', padding: '4px' }}
                       />
                     </div>
                   </div>
                 )}
 
                 {(bgType === 'linear' || bgType === 'linear3') && (
-                  <div className="row">
+                  <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                     <label>Gradient Angle:</label>
-                    <div className="sync-group">
+                    <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                       <input 
                         type="range" min="0" max="360" 
                         value={getGVar(`${selectedComp}_bg_angle`, '90')} 
-                        onChange={(e) => updateGraphicVar(`${selectedComp}_bg_angle`, e.target.value)} 
+                        onChange={(e) => updateGraphicVar(`${selectedComp}_bg_angle`, e.target.value, false, true)} 
+                        onMouseUp={() => pushHistory(state?.graphics_config)}
+                        onTouchEnd={() => pushHistory(state?.graphics_config)}
                       />
                       <input 
                         type="number" className="sync-num" 
                         value={getGVar(`${selectedComp}_bg_angle`, '90')} 
                         onChange={(e) => updateGraphicVar(`${selectedComp}_bg_angle`, e.target.value)} 
-                        style={{ width: '55px' }}
+                        style={{ width: '55px', height: '32px', textAlign: 'center' }}
                       />
                     </div>
                   </div>
                 )}
 
                 {bgType !== 'clear' && (
-                  <div className="row">
+                  <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                     <label>BG Transparency:</label>
-                    <div className="sync-group">
+                    <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                       <input 
                         type="range" min="0" max="100" 
                         value={getGVar(`${selectedComp}_bg_alpha`, '100')} 
-                        onChange={(e) => updateGraphicVar(`${selectedComp}_bg_alpha`, e.target.value)} 
+                        onChange={(e) => updateGraphicVar(`${selectedComp}_bg_alpha`, e.target.value, false, true)} 
+                        onMouseUp={() => pushHistory(state?.graphics_config)}
+                        onTouchEnd={() => pushHistory(state?.graphics_config)}
                       />
                       <input 
                         type="number" className="sync-num" 
                         value={getGVar(`${selectedComp}_bg_alpha`, '100')} 
                         onChange={(e) => updateGraphicVar(`${selectedComp}_bg_alpha`, e.target.value)} 
-                        style={{ width: '55px' }}
+                        style={{ width: '55px', height: '32px', textAlign: 'center' }}
                       />
                     </div>
                   </div>
                 )}
               </div>
 
+              {/* MEDIA PANEL WITH TRACKED SLIDERS & UNCLIPPED Y-BOUNDARIES */}
               <div style={{ flex: '1 1 250px' }}>
                 <div className="row" style={{ alignItems: 'flex-start' }}>
                   <label>BG Media (Img/Vid):</label>
@@ -1551,7 +1830,14 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                     />
                     
                     {currentMediaUrl && (
-                      <div style={{ border: `1px solid ${themeVars.borderCol}`, borderRadius: '4px', overflow: 'hidden', background: themeVars.bgInput, height: '80px', position: 'relative' }}>
+                      <div style={{ 
+                        border: `1px solid ${themeVars.borderCol}`, 
+                        borderRadius: '6px', 
+                        overflow: 'hidden', 
+                        background: themeVars.bgInput, 
+                        height: '100px', 
+                        position: 'relative' 
+                      }}>
                         {currentIsVideo ? (
                           <video 
                             key={`${currentMediaUrl}_${currentMediaLoop}_${currentMediaTs}`}
@@ -1560,7 +1846,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                             style={{ 
                               width: '100%', height: '100%', objectFit: 'contain', position: 'absolute', top: 0, left: 0,
                               opacity: parseFloat(currentImgAlpha) / 100,
-                              transform: `translate(${currentImgX}%, ${currentImgY}%) scale(${parseFloat(currentImgScale) / 100})`
+                              transform: `translate(${currentImgX}%, ${currentImgY}%) scale(${parseFloat(currentImgScale) / 100}) skewX(${mediaComputedSkew}deg)`
                             }} 
                           />
                         ) : (
@@ -1570,7 +1856,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                             style={{ 
                               width: '100%', height: '100%', objectFit: 'contain', position: 'absolute', top: 0, left: 0,
                               opacity: parseFloat(currentImgAlpha) / 100,
-                              transform: `translate(${currentImgX}%, ${currentImgY}%) scale(${parseFloat(currentImgScale) / 100})`
+                              transform: `translate(${currentImgX}%, ${currentImgY}%) scale(${parseFloat(currentImgScale) / 100}) skewX(${mediaComputedSkew}deg)`
                             }} 
                           />
                         )}
@@ -1582,23 +1868,13 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                 </div>
 
                 {currentIsVideo && (
-                  <div className="row">
+                  <div className="row" style={{ marginTop: '10px' }}>
                     <label>Loop Media:</label>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                       <input 
                         type="checkbox" 
                         checked={currentMediaLoop} 
-                        onChange={(e) => {
-                          const newLoop = e.target.checked;
-                          const nowTs = Date.now();
-                          const newConfig = {
-                            ...(state.graphics_config || {}),
-                            [`${selectedComp}_media_loop`]: newLoop,
-                            [`${selectedComp}_media_ts`]: nowTs
-                          };
-                          setState((prev: any) => ({ ...prev, graphics_config: newConfig }));
-                          supabase.from('scoreboards').update({ graphics_config: newConfig }).eq('id', id);
-                        }} 
+                        onChange={(e) => updateGraphicVar(`${selectedComp}_media_loop`, e.target.checked, true)} 
                         style={{ flex: 'none', width: 'auto' }} 
                       />
                       <span style={{ fontSize: '11px' }}>Loops video endlessly</span>
@@ -1606,84 +1882,96 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                   </div>
                 )}
 
-                <div className="row">
+                {/* SCALE SLIDER WITH MOUSE-UP HISTORY PUSH */}
+                <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '10px' }}>
                   <label>Scale %:</label>
-                  <div className="sync-group">
+                  <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <input 
                       type="range" min="10" max="500" step="5" 
                       value={currentImgScale} 
-                      onChange={(e) => updateGraphicVar(`${selectedComp}_img_scale`, e.target.value)} 
+                      onChange={(e) => updateGraphicVar(`${selectedComp}_img_scale`, e.target.value, false, true)} 
+                      onMouseUp={() => pushHistory(state?.graphics_config)}
+                      onTouchEnd={() => pushHistory(state?.graphics_config)}
                     />
                     <input 
                       type="number" className="sync-num" 
                       value={currentImgScale} 
                       onChange={(e) => updateGraphicVar(`${selectedComp}_img_scale`, e.target.value)} 
-                      style={{ width: '55px' }}
+                      style={{ width: '55px', height: '32px', textAlign: 'center' }}
                     />
                   </div>
                 </div>
 
-                <div className="row">
+                {/* ALPHA SLIDER WITH MOUSE-UP HISTORY PUSH */}
+                <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '10px' }}>
                   <label>Alpha %:</label>
-                  <div className="sync-group">
+                  <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <input 
                       type="range" min="0" max="100" 
                       value={currentImgAlpha} 
-                      onChange={(e) => updateGraphicVar(`${selectedComp}_img_alpha`, e.target.value)} 
+                      onChange={(e) => updateGraphicVar(`${selectedComp}_img_alpha`, e.target.value, false, true)} 
+                      onMouseUp={() => pushHistory(state?.graphics_config)}
+                      onTouchEnd={() => pushHistory(state?.graphics_config)}
                     />
                     <input 
                       type="number" className="sync-num" 
                       value={currentImgAlpha} 
                       onChange={(e) => updateGraphicVar(`${selectedComp}_img_alpha`, e.target.value)} 
-                      style={{ width: '55px' }}
+                      style={{ width: '55px', height: '32px', textAlign: 'center' }}
                     />
                   </div>
                 </div>
 
-                <div className="row">
+                {/* POS X SLIDER WITH MOUSE-UP HISTORY PUSH */}
+                <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '10px' }}>
                   <label>Pos X %:</label>
-                  <div className="sync-group">
+                  <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <input 
                       type="range" min="-200" max="200" 
                       value={currentImgX} 
-                      onChange={(e) => updateGraphicVar(`${selectedComp}_img_x`, e.target.value)} 
+                      onChange={(e) => updateGraphicVar(`${selectedComp}_img_x`, e.target.value, false, true)} 
+                      onMouseUp={() => pushHistory(state?.graphics_config)}
+                      onTouchEnd={() => pushHistory(state?.graphics_config)}
                     />
                     <input 
                       type="number" className="sync-num" 
                       value={currentImgX} 
                       onChange={(e) => updateGraphicVar(`${selectedComp}_img_x`, e.target.value)} 
-                      style={{ width: '55px' }}
+                      style={{ width: '55px', height: '32px', textAlign: 'center' }}
                     />
                   </div>
                 </div>
 
-                <div className="row">
+                {/* POS Y SLIDER WITH MOUSE-UP HISTORY PUSH */}
+                <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '10px' }}>
                   <label>Pos Y %:</label>
-                  <div className="sync-group">
+                  <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <input 
                       type="range" min="-200" max="200" 
                       value={currentImgY} 
-                      onChange={(e) => updateGraphicVar(`${selectedComp}_img_y`, e.target.value)} 
+                      onChange={(e) => updateGraphicVar(`${selectedComp}_img_y`, e.target.value, false, true)} 
+                      onMouseUp={() => pushHistory(state?.graphics_config)}
+                      onTouchEnd={() => pushHistory(state?.graphics_config)}
                     />
                     <input 
                       type="number" className="sync-num" 
                       value={currentImgY} 
                       onChange={(e) => updateGraphicVar(`${selectedComp}_img_y`, e.target.value)} 
-                      style={{ width: '55px' }}
+                      style={{ width: '55px', height: '32px', textAlign: 'center' }}
                     />
                   </div>
                 </div>
 
-                <div className="row">
-                  <label>Reverse Skew:</label>
+                <div className="row" style={{ display: 'flex', alignItems: 'center', marginTop: '10px' }}>
+                  <label>Global Skew:</label>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <input 
                       type="checkbox" 
-                      checked={currentRevSkew} 
-                      onChange={(e) => updateGraphicVar(`${selectedComp}_rev_skew`, e.target.checked, true)} 
+                      checked={mediaUseGlobalSkew} 
+                      onChange={(e) => updateGraphicVar(`${selectedComp}_use_global_skew`, e.target.checked, true)} 
                       style={{ flex: 'none', width: 'auto' }} 
                     />
-                    <span style={{ fontSize: '11px' }}>Keeps media upright</span>
+                    <span style={{ fontSize: '11px' }}>Inherit Global Box Skew ({globalSkewVal}°)</span>
                   </div>
                 </div>
               </div>
@@ -1798,21 +2086,70 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             </div>
           </div>
 
+          {/* JSON FILE EXPORT / IMPORT WITH ACTIVE FOLDER & EVENT NAMING */}
           <div className="box">
             <h3>JSON FILE EXPORT / IMPORT</h3>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              <button onClick={selectExportFolder} style={{ background: themeVars.btnSecondaryBg, color: themeVars.btnSecondaryText, border: `1px solid ${themeVars.btnSecondaryBorder}`, borderRadius: '6px', padding: '10px', fontSize: '12px', fontWeight: 'bold', cursor: 'pointer' }}>
-                1. SELECT EXPORT FOLDER
-              </button>
-              <div style={{ display: 'flex', gap: '12px' }}>
-                <button onClick={exportProfileJSON} style={{ flex: 1, background: '#3b82f6', color: '#fff', border: 'none', borderRadius: '6px', padding: '10px', fontSize: '12px', fontWeight: 'bold', cursor: 'pointer' }}>
-                  2. EXPORT JSON
+              
+              {/* Event / Profile Save As Name Input */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                <label style={{ fontSize: '12px', fontWeight: 'bold' }}>Save As (Event / Profile Name):</label>
+                <input 
+                  type="text" 
+                  value={profileEventName}
+                  onChange={(e) => setProfileEventName(e.target.value)}
+                  placeholder="e.g. Playoff_Game_1_RinkA"
+                  style={{ padding: '8px', fontSize: '12px', borderRadius: '4px' }}
+                />
+              </div>
+
+              {/* Folder Selector & Active Folder Name Status */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <button 
+                    onClick={selectExportFolder} 
+                    style={{ flex: 1, background: themeVars.btnSecondaryBg, color: themeVars.btnSecondaryText, border: `1px solid ${themeVars.btnSecondaryBorder}`, borderRadius: '6px', padding: '8px 10px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
+                  >
+                    📁 SELECT EXPORT FOLDER
+                  </button>
+                  {exportFolderHandle && (
+                    <button 
+                      onClick={clearExportFolder}
+                      style={{ background: '#ef4444', color: '#fff', border: 'none', borderRadius: '6px', padding: '8px 10px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' }}
+                      title="Reset to default download folder"
+                    >
+                      ✖ RESET
+                    </button>
+                  )}
+                </div>
+                
+                <div style={{ 
+                  fontSize: '11px', 
+                  color: exportFolderName ? '#10b981' : themeVars.textMuted, 
+                  background: themeVars.bgInput, 
+                  padding: '6px 10px', 
+                  borderRadius: '4px', 
+                  border: `1px solid ${themeVars.borderCol}`,
+                  wordBreak: 'break-all'
+                }}>
+                  <strong>Active Target Folder:</strong> {exportFolderName ? `📂 ${exportFolderName}` : 'Default Downloads Folder'}
+                </div>
+              </div>
+
+              {/* Action Buttons */}
+              <div style={{ display: 'flex', gap: '12px', marginTop: '4px' }}>
+                <button 
+                  onClick={exportProfileJSON} 
+                  style={{ flex: 1, background: '#3b82f6', color: '#fff', border: 'none', borderRadius: '6px', padding: '10px', fontSize: '12px', fontWeight: 'bold', cursor: 'pointer' }}
+                >
+                  💾 EXPORT JSON
                 </button>
                 <label style={{ flex: 1, background: '#8b5cf6', color: '#fff', borderRadius: '6px', padding: '10px', fontSize: '12px', fontWeight: 'bold', cursor: 'pointer', textAlign: 'center' }}>
-                  IMPORT JSON
+                  📥 IMPORT JSON
                   <input type="file" accept=".json" onChange={importProfileJSON} style={{ display: 'none' }} />
                 </label>
               </div>
+
             </div>
           </div>
 

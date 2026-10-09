@@ -83,7 +83,7 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
       ppTeam = isAwayPP ? state.away_name : state.home_name;
       const lowestTime = isAwayPP ? Math.min(...homePens.map(p=>p.time)) : Math.min(...awayPens.map(p=>p.time));
       ppTimeStr = formatTime(lowestTime);
-      ppSituationStr = `${5 - homePens.length} VS ${5 - awayPens.length}`;
+      ppSituationStr = `${5 - awayPens.length} VS ${5 - homePens.length}`;
     }
   }
 
@@ -157,38 +157,52 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
     const alpha = parseFloat(gc[`${compKey}_img_alpha`] || '100') / 100;
     const posX = gc[`${compKey}_img_x`] || '0';
     const posY = gc[`${compKey}_img_y`] || '0';
-    const revSkew = gc[`${compKey}_rev_skew`] === true;
+    
+    const useGlobalSkew = gc[`${compKey}_use_global_skew`] === true;
+    const globalSkewVal = gc.skewAngle ?? (layoutStyle === 'style1' ? -15 : 0);
+    const mediaSkew = useGlobalSkew ? `${globalSkewVal}deg` : '0deg';
 
-    const mediaStyle: React.CSSProperties = {
+    const wrapperStyle: React.CSSProperties = {
       position: 'absolute',
-      top: 0,
-      left: 0,
-      width: '100%',
-      height: '100%',
-      objectFit: 'cover',
+      inset: 0,
       pointerEvents: 'none',
       zIndex: 0,
+      overflow: 'hidden',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center'
+    };
+
+    const mediaStyle: React.CSSProperties = {
+      width: '100%',
+      height: '100%',
+      objectFit: 'contain',
+      pointerEvents: 'none',
       opacity: alpha,
-      transform: `translate(${posX}%, ${posY}%) scale(${scale}) ${revSkew ? `skewX(${layoutStyle === 'style1' ? '15deg' : '0deg'})` : ''}`
+      transform: `translate(${posX}%, ${posY}%) scale(${scale}) skewX(${mediaSkew})`
     };
 
     if (isVid) {
       return (
-        <video 
-          key={`${url}_${loop}_${ts}`}
-          src={url}
-          autoPlay loop muted playsInline
-          style={mediaStyle}
-        />
+        <div style={wrapperStyle}>
+          <video 
+            key={`${url}_${loop}_${ts}`}
+            src={url}
+            autoPlay loop muted playsInline
+            style={mediaStyle}
+          />
+        </div>
       );
     }
 
     return (
-      <img 
-        key={`${url}_${ts}`}
-        src={url} alt="Background Media" 
-        style={mediaStyle}
-      />
+      <div style={wrapperStyle}>
+        <img 
+          key={`${url}_${ts}`}
+          src={url} alt="Background Media" 
+          style={mediaStyle}
+        />
+      </div>
     );
   };
 
@@ -283,7 +297,7 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
     >
       {/* STYLE 1: LINEAR SLANTED BUG BAR */}
       {layoutStyle === 'style1' && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', width: 'fit-content' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', width: 'fit-content' }}>
           
           <div 
             style={{ 
@@ -307,7 +321,8 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
                 <span style={{ position: 'relative', zIndex: 1, transform: getTextSkewTransform('period') }}>{state.period}</span>
               </div>
               
-              <div style={{ padding: '12px 28px', ...getCompStyle('awayTeam', state.away_color || '#00468b', '#ffffff', 32), fontWeight: 'bold', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minWidth: '180px' }}>
+              {/* AWAY TEAM BOX */}
+              <div id="away-team-box-wrapper" style={{ padding: '12px 28px', ...getCompStyle('awayTeam', state.away_color || '#00468b', '#ffffff', 32), fontWeight: 'bold', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minWidth: '180px', position: 'relative' }}>
                 {renderCompMedia('awayTeam')}
                 <span style={{ position: 'relative', zIndex: 1, transform: getTextSkewTransform('awayTeam') }}>{state.away_name}</span>
                 <span style={{ fontSize: '11px', background: 'rgba(0,0,0,0.5)', padding: '2px 8px', borderRadius: '10px', marginTop: '2px', position: 'relative', zIndex: 1, transform: getTextSkewTransform('awayTeam') }}>SOG: {state.away_sog}</span>
@@ -318,7 +333,8 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
                 <span style={{ position: 'relative', zIndex: 1, transform: getTextSkewTransform('awayScore') }}>{state.away_score}</span>
               </div>
 
-              <div style={{ padding: '12px 28px', ...getCompStyle('homeTeam', state.home_color || '#111111', '#ffffff', 32), fontWeight: 'bold', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minWidth: '180px' }}>
+              {/* HOME TEAM BOX */}
+              <div id="home-team-box-wrapper" style={{ padding: '12px 28px', ...getCompStyle('homeTeam', state.home_color || '#111111', '#ffffff', 32), fontWeight: 'bold', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minWidth: '180px', position: 'relative' }}>
                 {renderCompMedia('homeTeam')}
                 <span style={{ position: 'relative', zIndex: 1, transform: getTextSkewTransform('homeTeam') }}>{state.home_name}</span>
                 <span style={{ fontSize: '11px', background: 'rgba(0,0,0,0.5)', padding: '2px 8px', borderRadius: '10px', marginTop: '2px', position: 'relative', zIndex: 1, transform: getTextSkewTransform('homeTeam') }}>SOG: {state.home_sog}</span>
@@ -367,22 +383,27 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
 
           {renderShootoutOverlay()}
 
-          <div style={{ display: 'flex', position: 'relative', marginTop: '4px' }}>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginLeft: '135px' }}>
+          {/* PENALTIES DISPLAY - EXACT TEAM BOX WIDTH & BORDER ALIGNMENT */}
+          <div style={{ display: 'flex', position: 'relative', marginTop: '6px', transform: `skewX(${skewAngle})` }}>
+            {/* Away Penalties */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', position: 'absolute', left: '175px', width: '236px' }}>
               {awayPens.map(p => (
-                <div key={p.id} style={{ background: state.away_color || '#00468b', color: '#fff', padding: '4px 16px', borderRadius: '4px', fontSize: '14px', fontWeight: 'bold', transform: `skewX(${skewAngle})`, width: '180px', display: 'flex', justifyContent: 'space-between' }}>
+                <div key={p.id} style={{ background: state.away_color || '#00468b', color: '#fff', padding: '6px 14px', borderRadius: '4px', fontSize: '15px', fontWeight: '900', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box', width: '100%' }}>
                   <span>#{p.plyr}</span><span>{formatTime(p.time)}</span>
                 </div>
               ))}
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginLeft: '60px' }}>
+
+            {/* Home Penalties */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', position: 'absolute', left: '511px', width: '236px' }}>
               {homePens.map(p => (
-                <div key={p.id} style={{ background: state.home_color || '#111111', color: '#fff', padding: '4px 16px', borderRadius: '4px', fontSize: '14px', fontWeight: 'bold', transform: `skewX(${skewAngle})`, width: '180px', display: 'flex', justifyContent: 'space-between' }}>
+                <div key={p.id} style={{ background: state.home_color || '#111111', color: '#fff', padding: '6px 14px', borderRadius: '4px', fontSize: '15px', fontWeight: '900', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box', width: '100%' }}>
                   <span>#{p.plyr}</span><span>{formatTime(p.time)}</span>
                 </div>
               ))}
             </div>
           </div>
+
         </div>
       )}
 
@@ -501,17 +522,17 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
 
           {renderShootoutOverlay()}
 
-          <div style={{ display: 'flex', position: 'relative', marginTop: '4px' }}>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginLeft: '130px', width: '180px' }}>
+          <div style={{ display: 'flex', gap: '20px', paddingLeft: '110px', marginTop: '4px' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
               {awayPens.map(p => (
-                <div key={p.id} style={{ background: state.away_color || '#00468b', color: '#fff', padding: '4px 16px', borderRadius: '4px', fontSize: '14px', fontWeight: 'bold', width: '100%', display: 'flex', justifyContent: 'space-between', boxSizing: 'border-box' }}>
+                <div key={p.id} style={{ background: state.away_color || '#00468b', color: '#fff', padding: '4px 12px', borderRadius: '4px', fontSize: '14px', fontWeight: 'bold', width: '150px', display: 'flex', justifyContent: 'space-between' }}>
                   <span>#{p.plyr}</span><span>{formatTime(p.time)}</span>
                 </div>
               ))}
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginLeft: '70px', width: '180px' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginLeft: '10px' }}>
               {homePens.map(p => (
-                <div key={p.id} style={{ background: state.home_color || '#222222', color: '#fff', padding: '4px 16px', borderRadius: '4px', fontSize: '14px', fontWeight: 'bold', width: '100%', display: 'flex', justifyContent: 'space-between', boxSizing: 'border-box' }}>
+                <div key={p.id} style={{ background: state.home_color || '#222222', color: '#fff', padding: '4px 12px', borderRadius: '4px', fontSize: '14px', fontWeight: 'bold', width: '150px', display: 'flex', justifyContent: 'space-between' }}>
                   <span>#{p.plyr}</span><span>{formatTime(p.time)}</span>
                 </div>
               ))}
