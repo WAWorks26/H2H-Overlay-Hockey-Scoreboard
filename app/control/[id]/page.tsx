@@ -390,11 +390,12 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
       broadcastState(updated);
       supabase.from('scoreboards').update({ [field]: newVal }).eq('id', id);
 
-      // Trigger Auto Goal Rollout if a Goal is added (+1)
+      // Separate Auto Goal Rollouts per team
       if (type === 'score' && val > 0 && getGVar('auto_goal_rollout', true)) {
         const teamName = team === 'away' ? (prev.away_name || 'AWAY') : (prev.home_name || 'HOME');
         const goalText = getGVar('goal_text_format', 'GOAL {TEAM}').replace('{TEAM}', teamName);
-        triggerRolloutWithAutoHide('goal', goalText);
+        const mode = team === 'away' ? 'awayGoal' : 'homeGoal';
+        triggerRolloutWithAutoHide(mode, goalText);
       }
 
       return updated;
@@ -839,7 +840,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
         }
       `}</style>
 
-      {/* BRANDING HEADER BAR WITH CAPSULE PILL LOGO */}
+      {/* BRANDING HEADER BAR */}
       <header style={{
         backgroundColor: themeVars.bgHeader,
         borderBottom: `3px solid ${themeVars.borderCol}`,
@@ -1039,7 +1040,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
               <div style={{ width: '8px', height: '28px', backgroundColor: state.home_color || '#222222', borderRadius: '10px', flex: 'none' }} />
 
               <div style={{ textAlign: 'left' }}>
-                <div style={{ fontSize: '15px', fontWeight: '900', color themeVars.textColor, lineHeight: '1.2' }}>
+                <div style={{ fontSize: '15px', fontWeight: '900', color: themeVars.textColor, lineHeight: '1.2' }}>
                   {state.home_name || 'HOME'}
                 </div>
                 <div style={{ fontSize: '10px', fontWeight: 'bold', color: themeVars.textMuted, marginTop: '2px' }}>
@@ -1438,7 +1439,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             </div>
           </div>
 
-          {/* COMPONENT EDITOR WITH GOAL ROLLOUT PANEL */}
+          {/* COMPONENT EDITOR WITH SEPARATE AWAY/HOME GOAL ROLLOUT ELEMENTS */}
           <div className="box" style={{ flex: '2 1 600px', borderColor: '#007bff' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #007bff', paddingBottom: '10px', marginBottom: '15px', flexWrap: 'wrap', gap: '10px' }}>
               <h3 style={{ border: 'none', margin: 0, padding: 0 }}>COMPONENT EDITOR</h3>
@@ -1498,18 +1499,19 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                 <select 
                   value={selectedComp} 
                   onChange={(e) => setSelectedComp(e.target.value)}
-                  style={{ width: '180px', flex: 'none', fontWeight: 'bold', ...selectStyle }}
+                  style={{ width: '210px', flex: 'none', fontWeight: 'bold', ...selectStyle }}
                 >
                   <option value="clock" style={selectStyle}>Game Clock</option>
                   <option value="period" style={selectStyle}>Period</option>
                   <option value="awayTeam" style={selectStyle}>Away Team Box</option>
                   <option value="awayScore" style={selectStyle}>Away Score</option>
+                  <option value="awayGoal" style={selectStyle}>Away Goal Rollout Panel</option>
                   <option value="homeTeam" style={selectStyle}>Home Team Box</option>
                   <option value="homeScore" style={selectStyle}>Home Score</option>
+                  <option value="homeGoal" style={selectStyle}>Home Goal Rollout Panel</option>
                   <option value="awaySog" style={selectStyle}>Away Shots on Goal</option>
                   <option value="homeSog" style={selectStyle}>Home Shots on Goal</option>
                   <option value="ppPanel" style={selectStyle}>Power Play (Panel BG)</option>
-                  <option value="goal" style={selectStyle}>Goal Rollout Panel</option>
                   <option value="rollout1" style={selectStyle}>Rollout 1</option>
                   <option value="rollout2" style={selectStyle}>Rollout 2</option>
                   <option value="rollout3" style={selectStyle}>Rollout 3</option>

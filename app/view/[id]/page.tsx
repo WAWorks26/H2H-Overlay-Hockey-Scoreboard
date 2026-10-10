@@ -89,13 +89,22 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
 
   const isRollout = state.right_panel_mode?.startsWith('rollout');
   const isDelayed = state.right_panel_mode === 'delayedPenalty';
-  const showRightPanel = isRollout || isDelayed || ppActive;
+  const isAwayGoal = state.right_panel_mode === 'awayGoal';
+  const isHomeGoal = state.right_panel_mode === 'homeGoal';
+  const isGoal = isAwayGoal || isHomeGoal || state.right_panel_mode === 'goal';
+  const activeGoalComp = isAwayGoal ? 'awayGoal' : isHomeGoal ? 'homeGoal' : 'goal';
+
+  const showRightPanel = isRollout || isDelayed || ppActive || isGoal;
 
   const getCompBackground = (compKey: string, fallbackColor: string) => {
     const bgType = gc[`${compKey}_bg_type`] || 'solid';
     if (bgType === 'clear') return { backgroundColor: 'transparent', backgroundImage: 'none' };
 
-    const c1 = gc[`${compKey}_bg_color`] || fallbackColor;
+    const c1 = gc[`${compKey}_bg_color`] || 
+      (compKey === 'awayTeam' || compKey === 'awayGoal' ? state.away_color : 
+       compKey === 'homeTeam' || compKey === 'homeGoal' ? state.home_color : null) || 
+      fallbackColor;
+      
     const c2 = gc[`${compKey}_bg_col2`] || '#000000';
     const c3 = gc[`${compKey}_bg_col3`] || '#888888';
     const angle = gc[`${compKey}_bg_angle`] || '90';
@@ -284,6 +293,8 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
     );
   };
 
+  const activePanelKey = isGoal ? activeGoalComp : isDelayed ? 'delayedPenalty' : 'rollout1';
+
   return (
     <div 
       id="scoreboard-master-container"
@@ -346,12 +357,21 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
               </div>
 
               {showRightPanel && (
-                <div style={{ padding: '12px 24px', background: '#ffcc00', color: '#000', fontSize: '20px', fontWeight: 'bold', display: 'flex', alignItems: 'center', position: 'relative', minWidth: '160px', justifyContent: 'center' }}>
-                  {renderCompMedia('delayedPenalty')}
-                  <span style={{ position: 'relative', zIndex: 1, transform: getTextSkewTransform('delayedPenalty') }}>
+                <div style={{ 
+                  padding: '12px 24px', 
+                  ...getCompStyle(activePanelKey, '#ffcc00', '#000000', 20),
+                  fontWeight: 'bold', 
+                  display: 'flex', 
+                  alignItems: 'center', 
+                  position: 'relative', 
+                  minWidth: '160px', 
+                  justifyContent: 'center' 
+                }}>
+                  {renderCompMedia(activePanelKey)}
+                  <span style={{ position: 'relative', zIndex: 1, transform: getTextSkewTransform(activePanelKey) }}>
                     {ppActive && `${ppTeam} PP ${ppTimeStr}`}
                     {isDelayed && 'DELAYED PENALTY'}
-                    {isRollout && state.right_panel_text}
+                    {(isRollout || isGoal) && state.right_panel_text}
                   </span>
                 </div>
               )}
@@ -383,9 +403,8 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
 
           {renderShootoutOverlay()}
 
-          {/* PENALTIES DISPLAY - EXACT TEAM BOX WIDTH & BORDER ALIGNMENT */}
+          {/* PENALTIES DISPLAY */}
           <div style={{ display: 'flex', position: 'relative', marginTop: '6px', transform: `skewX(${skewAngle})` }}>
-            {/* Away Penalties */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', position: 'absolute', left: '175px', width: '236px' }}>
               {awayPens.map(p => (
                 <div key={p.id} style={{ background: state.away_color || '#00468b', color: '#fff', padding: '6px 14px', borderRadius: '4px', fontSize: '15px', fontWeight: '900', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box', width: '100%' }}>
@@ -394,7 +413,6 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
               ))}
             </div>
 
-            {/* Home Penalties */}
             <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', position: 'absolute', left: '511px', width: '236px' }}>
               {homePens.map(p => (
                 <div key={p.id} style={{ background: state.home_color || '#111111', color: '#fff', padding: '6px 14px', borderRadius: '4px', fontSize: '15px', fontWeight: '900', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box', width: '100%' }}>
@@ -410,7 +428,6 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
       {/* STYLE 2: CLASSIC GRID BUG */}
       {layoutStyle === 'style2' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', width: 'fit-content' }}>
-          
           <div 
             style={{ 
               position: 'relative',
@@ -422,7 +439,6 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
             }}
           >
             <div style={{ display: 'flex', alignItems: 'stretch', height: '80px' }}>
-              
               <div style={{ display: 'flex', flexDirection: 'column', width: '130px', height: '100%' }}>
                 <div style={{ height: '50%', ...getCompStyle('clock', '#111111', '#ffffff', 28), padding: '0 12px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>
                   {renderCompMedia('clock')}
@@ -477,7 +493,18 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
               </div>
 
               {showRightPanel && (
-                <div style={{ padding: '0 24px', background: '#ffcc00', color: '#000', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minWidth: '160px', fontWeight: 'bold', height: '100%', textAlign: 'center' }}>
+                <div style={{ 
+                  padding: '0 24px', 
+                  ...getCompStyle(activePanelKey, '#ffcc00', '#000000', 20),
+                  display: 'flex', 
+                  flexDirection: 'column', 
+                  alignItems: 'center', 
+                  justifyContent: 'center', 
+                  minWidth: '160px', 
+                  fontWeight: 'bold', 
+                  height: '100%', 
+                  textAlign: 'center' 
+                }}>
                   {ppActive ? (
                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
                       <span style={{ fontSize: '12px', textTransform: 'uppercase', marginBottom: '2px', lineHeight: 1 }}>{ppSituationStr || `${ppTeam} PP`}</span>
@@ -487,7 +514,7 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
                       <span style={{ fontSize: '20px', lineHeight: 1 }}>
                         {isDelayed && 'DELAYED PENALTY'}
-                        {isRollout && state.right_panel_text}
+                        {(isRollout || isGoal) && state.right_panel_text}
                       </span>
                     </div>
                   )}
@@ -544,7 +571,6 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
       {/* STYLE 3: COMPACT SPLIT BUG */}
       {layoutStyle === 'style3' && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', width: 'fit-content' }}>
-          
           <div 
             style={{ 
               position: 'relative',
@@ -556,7 +582,6 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
             }}
           >
             <div style={{ display: 'flex', alignItems: 'stretch', height: '80px' }}>
-              
               <div style={{ display: 'flex', flexDirection: 'column', minWidth: '110px', height: '100%' }}>
                 <div style={{ height: '50%', ...getCompStyle('clock', '#111111', '#ffffff', 28), padding: '0 16px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold' }}>
                   {renderCompMedia('clock')}
@@ -624,10 +649,20 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
               </div>
 
               {showRightPanel && (
-                <div style={{ padding: '0 20px', background: '#ffcc00', color: '#000', fontSize: '20px', fontWeight: 'bold', display: 'flex', alignItems: 'center', minWidth: '160px', justifyContent: 'center', height: '100%' }}>
+                <div style={{ 
+                  padding: '0 20px', 
+                  ...getCompStyle(activePanelKey, '#ffcc00', '#000000', 20),
+                  fontSize: '20px', 
+                  fontWeight: 'bold', 
+                  display: 'flex', 
+                  alignItems: 'center', 
+                  minWidth: '160px', 
+                  justifyContent: 'center', 
+                  height: '100%' 
+                }}>
                   {ppActive && `${ppTeam} PP ${ppTimeStr}`}
                   {isDelayed && 'DELAYED PENALTY'}
-                  {isRollout && state.right_panel_text}
+                  {(isRollout || isGoal) && state.right_panel_text}
                 </div>
               )}
             </div>
