@@ -1894,12 +1894,12 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                   </div>
                 )}
 
-                {/* SCALE SLIDER WITH MOUSE-UP HISTORY PUSH */}
+                {/* SCALE SLIDER WITH MAX INCREASED TO 1000% */}
                 <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '10px' }}>
                   <label>Scale %:</label>
                   <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                     <input 
-                      type="range" min="10" max="500" step="5" 
+                      type="range" min="10" max="1000" step="5" 
                       value={currentImgScale} 
                       onChange={(e) => updateGraphicVar(`${selectedComp}_img_scale`, e.target.value, false, true)} 
                       onMouseUp={() => pushHistory(state?.graphics_config)}
