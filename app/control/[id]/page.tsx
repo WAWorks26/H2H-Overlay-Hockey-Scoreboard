@@ -1662,30 +1662,42 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                       <input 
                         type="color" 
                         value={
-                          selectedComp === 'awayTeam' ? state.away_color || '#00468b' :
-                          selectedComp === 'homeTeam' ? state.home_color || '#222222' :
+                          selectedComp === 'awayTeam' ? state.away_color || getGVar('awayTeam_bg_color', '#00468b') :
+                          selectedComp === 'homeTeam' ? state.home_color || getGVar('homeTeam_bg_color', '#222222') :
                           getGVar(`${selectedComp}_bg_color`, '#111111')
                         } 
                         onChange={(e) => {
                           const val = e.target.value;
-                          if (selectedComp === 'awayTeam') updateField('away_color', val);
-                          else if (selectedComp === 'homeTeam') updateField('home_color', val);
-                          else updateGraphicVar(`${selectedComp}_bg_color`, val, true);
+                          if (selectedComp === 'awayTeam') {
+                            updateField('away_color', val);
+                            updateGraphicVar('awayTeam_bg_color', val, true);
+                          } else if (selectedComp === 'homeTeam') {
+                            updateField('home_color', val);
+                            updateGraphicVar('homeTeam_bg_color', val, true);
+                          } else {
+                            updateGraphicVar(`${selectedComp}_bg_color`, val, true);
+                          }
                         }} 
                         style={{ width: '32px', height: '32px', padding: 0, cursor: 'pointer', border: 'none', borderRadius: '4px' }}
                       />
                       <input 
                         type="text" 
                         value={
-                          selectedComp === 'awayTeam' ? state.away_color || '#00468b' :
-                          selectedComp === 'homeTeam' ? state.home_color || '#222222' :
+                          selectedComp === 'awayTeam' ? state.away_color || getGVar('awayTeam_bg_color', '#00468b') :
+                          selectedComp === 'homeTeam' ? state.home_color || getGVar('homeTeam_bg_color', '#222222') :
                           getGVar(`${selectedComp}_bg_color`, '#111111')
                         } 
                         onChange={(e) => {
                           const val = e.target.value;
-                          if (selectedComp === 'awayTeam') updateField('away_color', val);
-                          else if (selectedComp === 'homeTeam') updateField('home_color', val);
-                          else updateGraphicVar(`${selectedComp}_bg_color`, val, true);
+                          if (selectedComp === 'awayTeam') {
+                            updateField('away_color', val);
+                            updateGraphicVar('awayTeam_bg_color', val, true);
+                          } else if (selectedComp === 'homeTeam') {
+                            updateField('home_color', val);
+                            updateGraphicVar('homeTeam_bg_color', val, true);
+                          } else {
+                            updateGraphicVar(`${selectedComp}_bg_color`, val, true);
+                          }
                         }} 
                         style={{ width: '85px', height: '32px', fontFamily: 'monospace', textAlign: 'center', padding: '4px' }}
                       />
