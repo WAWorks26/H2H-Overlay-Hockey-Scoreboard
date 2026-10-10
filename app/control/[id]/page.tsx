@@ -41,6 +41,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
   stateRef.current = state;
   const channelRef = useRef<any>(null);
   const debounceTimer = useRef<NodeJS.Timeout | null>(null);
+  const rolloutTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     const channel = supabase.channel(`scoreboard_${id}`, { config: { broadcast: { self: false } } });
@@ -364,6 +365,22 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     });
   };
 
+  const triggerRolloutWithAutoHide = (modeName: string, textValue: string) => {
+    if (rolloutTimerRef.current) clearTimeout(rolloutTimerRef.current);
+
+    const autoHide = getGVar('rollout_autohide', true);
+    const duration = parseInt(getGVar('rollout_duration', '5')) || 5;
+
+    updateField('right_panel_mode', modeName);
+    updateField('right_panel_text', textValue);
+
+    if (autoHide && modeName !== 'none') {
+      rolloutTimerRef.current = setTimeout(() => {
+        updateField('right_panel_mode', 'none');
+      }, duration * 1000);
+    }
+  };
+
   const adjStat = (team: 'away' | 'home', type: 'score' | 'sog', val: number) => {
     setState((prev: any) => {
       if (!prev) return prev;
@@ -372,6 +389,14 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
       const updated = { ...prev, [field]: newVal };
       broadcastState(updated);
       supabase.from('scoreboards').update({ [field]: newVal }).eq('id', id);
+
+      // Trigger Auto Goal Rollout if a Goal is added (+1)
+      if (type === 'score' && val > 0 && getGVar('auto_goal_rollout', true)) {
+        const teamName = team === 'away' ? (prev.away_name || 'AWAY') : (prev.home_name || 'HOME');
+        const goalText = getGVar('goal_text_format', 'GOAL {TEAM}').replace('{TEAM}', teamName);
+        triggerRolloutWithAutoHide('goal', goalText);
+      }
+
       return updated;
     });
   };
@@ -384,15 +409,14 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     const newMode = isActivating ? modeName : 'none';
     const txt = getGVar(`rollout${num}_text`, `ROLLOUT ${num}`);
     
-    updateField('right_panel_mode', newMode);
-    updateField('right_panel_text', txt);
+    triggerRolloutWithAutoHide(newMode, txt);
   };
 
   const triggerDelayedPenalty = async () => {
     const currentState = stateRef.current;
     if (!currentState) return;
     const newMode = currentState.right_panel_mode === 'delayedPenalty' ? 'none' : 'delayedPenalty';
-    updateField('right_panel_mode', newMode);
+    triggerRolloutWithAutoHide(newMode, 'DELAYED PENALTY');
   };
 
   const triggerBanner = async () => {
@@ -815,7 +839,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
         }
       `}</style>
 
-      {/* BRANDING HEADER BAR WITH CAPSULE PILL LOGO - USES DIRECT TRANSPARENT BRAND IMAGE */}
+      {/* BRANDING HEADER BAR WITH CAPSULE PILL LOGO */}
       <header style={{
         backgroundColor: themeVars.bgHeader,
         borderBottom: `3px solid ${themeVars.borderCol}`,
@@ -836,7 +860,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             padding: '5px 18px',
             boxShadow: '0 2px 6px rgba(0,0,0,0.1)'
           }}>
-            {/* Direct Official Brand Icon PNG */}
             <img 
               src="/brand/h2h-logo-icon.png" 
               alt="H2H Emblem" 
@@ -918,7 +941,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
       {/* GAME OPS TAB */}
       <div id="tab-ops" className={`tab-content ${activeTab === 'tab-ops' ? 'active' : ''}`}>
         
-        {/* LIVE BROADCAST DISPLAY PREVIEW - PENALTIES POSITIONED TO THE LEFT AND RIGHT OF TEAMS */}
+        {/* LIVE BROADCAST DISPLAY PREVIEW */}
         <div className="box" style={{ 
           background: themeVars.bgBox, 
           border: `1px solid ${themeVars.borderCol}`, 
@@ -951,8 +974,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             
             {/* AWAY TEAM BLOCK WITH LEFT PENALTIES */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
-              
-              {/* Away Penalties (Left of Logo) */}
               {(state.penalties || []).filter((p: Penalty) => p.team === 'away').length > 0 && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', width: '140px', flex: 'none' }}>
                   {(state.penalties || []).filter((p: Penalty) => p.team === 'away').map((p: Penalty) => (
@@ -963,7 +984,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                 </div>
               )}
 
-              {/* Away Logo */}
               <div style={{ width: '60px', height: '60px', position: 'relative', flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
                 {getGVar('awayTeam_media_url') && (
                   <img 
@@ -974,7 +994,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                 )}
               </div>
 
-              {/* Away Name & SOG */}
               <div style={{ textAlign: 'right' }}>
                 <div style={{ fontSize: '15px', fontWeight: '900', color: themeVars.textColor, lineHeight: '1.2' }}>
                   {state.away_name || 'AWAY'}
@@ -984,10 +1003,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                 </div>
               </div>
 
-              {/* Away Color Pill */}
               <div style={{ width: '8px', height: '28px', backgroundColor: state.away_color || '#00468b', borderRadius: '10px', flex: 'none' }} />
 
-              {/* Away Score */}
               <div style={{ fontSize: '32px', fontWeight: '900', color: themeVars.textColor, minWidth: '24px', textAlign: 'center' }}>
                 {state.away_score}
               </div>
@@ -1015,15 +1032,12 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
 
             {/* HOME TEAM BLOCK WITH RIGHT PENALTIES */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
-              {/* Home Score */}
               <div style={{ fontSize: '32px', fontWeight: '900', color: themeVars.textColor, minWidth: '24px', textAlign: 'center' }}>
                 {state.home_score}
               </div>
 
-              {/* Home Color Pill */}
               <div style={{ width: '8px', height: '28px', backgroundColor: state.home_color || '#222222', borderRadius: '10px', flex: 'none' }} />
 
-              {/* Home Name & SOG */}
               <div style={{ textAlign: 'left' }}>
                 <div style={{ fontSize: '15px', fontWeight: '900', color: themeVars.textColor, lineHeight: '1.2' }}>
                   {state.home_name || 'HOME'}
@@ -1033,7 +1047,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                 </div>
               </div>
 
-              {/* Home Logo */}
               <div style={{ width: '60px', height: '60px', position: 'relative', flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
                 {getGVar('homeTeam_media_url') && (
                   <img 
@@ -1044,7 +1057,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                 )}
               </div>
 
-              {/* Home Penalties (Right of Logo) */}
               {(state.penalties || []).filter((p: Penalty) => p.team === 'home').length > 0 && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', width: '140px', flex: 'none' }}>
                   {(state.penalties || []).filter((p: Penalty) => p.team === 'home').map((p: Penalty) => (
@@ -1120,7 +1132,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             position: 'relative',
             overflow: 'hidden'
           }}>
-            {/* OFFICIAL DIRECT BRAND IMAGE WATERMARK */}
             <div style={{
               position: 'absolute',
               top: '55%',
@@ -1162,7 +1173,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
           </div>
 
           <div className="box">
-            <h3>PENALTIES & TRIGGERS</h3>
+            <h3>PENALTIES & ROLLOUTS</h3>
             <div className="row">
                 <select id="sel-pen-team" style={{ width: '75px', flex: 'none', ...selectStyle }}><option value="away" style={selectStyle}>Away</option><option value="home" style={selectStyle}>Home</option></select>
                 <input type="text" id="inp-pen-plyr" placeholder="Plyr #" style={{ width: '60px', flex: 'none' }} />
@@ -1183,6 +1194,40 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
 
             <hr style={{ borderColor: themeVars.borderCol, margin: '15px 0' }} />
             
+            {/* ROLLOUT CONTROLS WITH AUTO HIDE TOGGLE AND DURATION */}
+            <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <input 
+                  type="checkbox" 
+                  id="chk-autohide"
+                  checked={getGVar('rollout_autohide', true)}
+                  onChange={(e) => updateGraphicVar('rollout_autohide', e.target.checked, true)}
+                />
+                <label htmlFor="chk-autohide" style={{ fontSize: '12px', cursor: 'pointer' }}>Auto Hide Rollout</label>
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <label style={{ fontSize: '12px' }}>Secs:</label>
+                <input 
+                  type="number" 
+                  min="1" max="60"
+                  value={getGVar('rollout_duration', '5')}
+                  onChange={(e) => updateGraphicVar('rollout_duration', e.target.value, true)}
+                  style={{ width: '45px', textAlign: 'center', padding: '2px 4px' }}
+                />
+              </div>
+            </div>
+
+            <div className="row" style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '12px' }}>
+              <input 
+                type="checkbox" 
+                id="chk-auto-goal"
+                checked={getGVar('auto_goal_rollout', true)}
+                onChange={(e) => updateGraphicVar('auto_goal_rollout', e.target.checked, true)}
+              />
+              <label htmlFor="chk-auto-goal" style={{ fontSize: '12px', cursor: 'pointer' }}>Auto Rollout on Goal (+1 G)</label>
+            </div>
+
             <div className="row">
                 <button className="btn btn-blue" style={{ borderRadius: '6px' }} onClick={() => triggerRollout(1)}>ROLLOUT 1</button>
                 <button className="btn btn-blue" style={{ borderRadius: '6px' }} onClick={() => triggerRollout(2)}>ROLLOUT 2</button>
@@ -1347,6 +1392,16 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             <hr style={{ borderColor: themeVars.borderCol, margin: '15px 0' }} />
 
             <div className="row">
+              <label>Goal Rollout Format:</label>
+              <input 
+                type="text" 
+                value={getGVar('goal_text_format', 'GOAL {TEAM}')} 
+                onChange={(e) => updateGraphicVar('goal_text_format', e.target.value, true)} 
+                placeholder="e.g. GOAL {TEAM}"
+              />
+            </div>
+
+            <div className="row">
               <label>Rollout 1 Text:</label>
               <input 
                 type="text" 
@@ -1383,7 +1438,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             </div>
           </div>
 
-          {/* COMPONENT EDITOR */}
+          {/* COMPONENT EDITOR WITH GOAL ROLLOUT ELEMENT */}
           <div className="box" style={{ flex: '2 1 600px', borderColor: '#007bff' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #007bff', paddingBottom: '10px', marginBottom: '15px', flexWrap: 'wrap', gap: '10px' }}>
               <h3 style={{ border: 'none', margin: 0, padding: 0 }}>COMPONENT EDITOR</h3>
@@ -1454,6 +1509,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                   <option value="awaySog" style={selectStyle}>Away Shots on Goal</option>
                   <option value="homeSog" style={selectStyle}>Home Shots on Goal</option>
                   <option value="ppPanel" style={selectStyle}>Power Play (Panel BG)</option>
+                  <option value="goal" style={selectStyle}>Goal Rollout Panel</option>
                   <option value="rollout1" style={selectStyle}>Rollout 1</option>
                   <option value="rollout2" style={selectStyle}>Rollout 2</option>
                   <option value="rollout3" style={selectStyle}>Rollout 3</option>
@@ -1828,7 +1884,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                 )}
               </div>
 
-              {/* MEDIA PANEL WITH TRACKED SLIDERS & UNCLIPPED Y-BOUNDARIES */}
+              {/* MEDIA PANEL WITH MAX 1000% SCALE */}
               <div style={{ flex: '1 1 250px' }}>
                 <div className="row" style={{ alignItems: 'flex-start' }}>
                   <label>BG Media (Img/Vid):</label>
@@ -1894,7 +1950,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                   </div>
                 )}
 
-                {/* SCALE SLIDER WITH MAX INCREASED TO 1000% */}
+                {/* SCALE SLIDER WITH MAX 1000% */}
                 <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '10px' }}>
                   <label>Scale %:</label>
                   <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
