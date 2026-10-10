@@ -1039,7 +1039,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
               <div style={{ width: '8px', height: '28px', backgroundColor: state.home_color || '#222222', borderRadius: '10px', flex: 'none' }} />
 
               <div style={{ textAlign: 'left' }}>
-                <div style={{ fontSize: '15px', fontWeight: '900', color: themeVars.textColor, lineHeight: '1.2' }}>
+                <div style={{ fontSize: '15px', fontWeight: '900', color themeVars.textColor, lineHeight: '1.2' }}>
                   {state.home_name || 'HOME'}
                 </div>
                 <div style={{ fontSize: '10px', fontWeight: 'bold', color: themeVars.textMuted, marginTop: '2px' }}>
@@ -1438,7 +1438,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             </div>
           </div>
 
-          {/* COMPONENT EDITOR WITH GOAL ROLLOUT ELEMENT */}
+          {/* COMPONENT EDITOR WITH GOAL ROLLOUT PANEL */}
           <div className="box" style={{ flex: '2 1 600px', borderColor: '#007bff' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #007bff', paddingBottom: '10px', marginBottom: '15px', flexWrap: 'wrap', gap: '10px' }}>
               <h3 style={{ border: 'none', margin: 0, padding: 0 }}>COMPONENT EDITOR</h3>
