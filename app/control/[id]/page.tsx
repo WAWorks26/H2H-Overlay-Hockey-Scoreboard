@@ -186,6 +186,83 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     });
   };
 
+  const adjClock = async (seconds: number) => {
+    setState((prev: any) => {
+      if (!prev) return prev;
+      const newSeconds = Math.max(0, prev.clock_seconds + seconds);
+      const updated = { ...prev, clock_seconds: newSeconds };
+      broadcastState(updated);
+      supabase.from('scoreboards').update({ clock_seconds: newSeconds }).eq('id', id);
+      return updated;
+    });
+  };
+
+  const toggleClock = async () => {
+    setState((prev: any) => {
+      if (!prev) return prev;
+      
+      const newRunningState = !prev.clock_running;
+      const currentSeconds = prev.clock_seconds;
+
+      const updated = {
+        ...prev,
+        clock_running: newRunningState,
+        clock_seconds: currentSeconds
+      };
+
+      broadcastState(updated);
+      supabase.from('scoreboards').update({ clock_running: newRunningState }).eq('id', id);
+
+      return updated;
+    });
+  };
+
+  const resetClock = () => {
+    const totalSecs = periodLengthMin * 60;
+    setState((prev: any) => {
+      if (!prev) return prev;
+      const updated = { ...prev, clock_running: false, clock_seconds: totalSecs };
+      broadcastState(updated);
+      supabase.from('scoreboards').update({ clock_running: false, clock_seconds: totalSecs }).eq('id', id);
+      return updated;
+    });
+  };
+
+  const handlePeriodChange = async (newPeriod: string) => {
+    const totalSecs = periodLengthMin * 60;
+    setState((prev: any) => {
+      if (!prev) return prev;
+      const updated = { 
+        ...prev, 
+        period: newPeriod,
+        clock_running: false, 
+        clock_seconds: totalSecs 
+      };
+      broadcastState(updated);
+      supabase.from('scoreboards').update({ 
+        period: newPeriod,
+        clock_running: false, 
+        clock_seconds: totalSecs 
+      }).eq('id', id);
+      return updated;
+    });
+  };
+
+  const setExactPenaltyTime = async (penId: number, mins: number, secs: number) => {
+    const newTotalSeconds = Math.max(0, (mins * 60) + secs);
+    setState((prev: any) => {
+      if (!prev) return prev;
+      const updatedPenalties = (prev.penalties || [])
+        .map((p: Penalty) => p.id === penId ? { ...p, time: newTotalSeconds } : p)
+        .filter((p: Penalty) => p.time > 0);
+
+      const updated = { ...prev, penalties: updatedPenalties };
+      broadcastState(updated);
+      supabase.from('scoreboards').update({ penalties: updatedPenalties }).eq('id', id);
+      return updated;
+    });
+  };
+
   const updateGraphicVar = async (key: string, value: any, immediate = false, skipHistory = false) => {
     setState((prev: any) => {
       if (!prev) return prev;
@@ -323,48 +400,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     updateGraphicVar('hotkeys', cleared, true);
   };
 
-  const adjClock = async (seconds: number) => {
-    setState((prev: any) => {
-      if (!prev) return prev;
-      const newSeconds = Math.max(0, prev.clock_seconds + seconds);
-      const updated = { ...prev, clock_seconds: newSeconds };
-      broadcastState(updated);
-      supabase.from('scoreboards').update({ clock_seconds: newSeconds }).eq('id', id);
-      return updated;
-    });
-  };
-
-  const toggleClock = async () => {
-    setState((prev: any) => {
-      if (!prev) return prev;
-      
-      const newRunningState = !prev.clock_running;
-      const currentSeconds = prev.clock_seconds;
-
-      const updated = {
-        ...prev,
-        clock_running: newRunningState,
-        clock_seconds: currentSeconds
-      };
-
-      broadcastState(updated);
-      supabase.from('scoreboards').update({ clock_running: newRunningState }).eq('id', id);
-
-      return updated;
-    });
-  };
-  
-  const resetClock = () => {
-    const totalSecs = periodLengthMin * 60;
-    setState((prev: any) => {
-      if (!prev) return prev;
-      const updated = { ...prev, clock_running: false, clock_seconds: totalSecs };
-      broadcastState(updated);
-      supabase.from('scoreboards').update({ clock_running: false, clock_seconds: totalSecs }).eq('id', id);
-      return updated;
-    });
-  };
-
   const triggerRolloutWithAutoHide = (modeName: string, textValue: string) => {
     if (rolloutTimerRef.current) clearTimeout(rolloutTimerRef.current);
 
@@ -390,7 +425,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
       broadcastState(updated);
       supabase.from('scoreboards').update({ [field]: newVal }).eq('id', id);
 
-      // Separate Auto Goal Rollouts per team
       if (type === 'score' && val > 0 && getGVar('auto_goal_rollout', true)) {
         const teamName = team === 'away' ? (prev.away_name || 'AWAY') : (prev.home_name || 'HOME');
         const goalText = getGVar('goal_text_format', 'GOAL {TEAM}').replace('{TEAM}', teamName);
@@ -1111,9 +1145,10 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
               />
             </div>
 
+            {/* AUTOMATIC CLOCK RESET ON GAME PHASE CHANGE */}
             <div className="row" style={{ marginTop: '10px' }}>
               <label>Game Phase:</label>
-              <select value={state.period} onChange={(e) => updateField('period', e.target.value)} style={selectStyle}>
+              <select value={state.period} onChange={(e) => handlePeriodChange(e.target.value)} style={selectStyle}>
                   <option value="WARM UP" style={selectStyle}>Warm Up</option>
                   <option value="1ST" style={selectStyle}>1st Period</option>
                   <option value="2ND" style={selectStyle}>2nd Period</option>
@@ -1184,13 +1219,46 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             </div>
             <div className="row"><button className="btn btn-orange" style={{ borderRadius: '6px' }} onClick={() => updateField('penalties', [])}>CLEAR ALL PENALTIES</button></div>
             
-            <div style={{ marginTop: '10px', maxHeight: '160px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '4px' }}>
-              {(state.penalties || []).map((p: Penalty) => (
-                <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', background: themeVars.bgInput, color: themeVars.textColor, padding: '6px 12px', borderRadius: '4px', fontSize: '12px', alignItems: 'center', borderLeft: `3px solid ${p.team === 'away' ? '#007bff' : '#dc3545'}` }}>
-                  <span><strong>{p.team.toUpperCase()}</strong> #{p.plyr} - {formatTime(p.time)}</span>
-                  <button onClick={() => removePenalty(p.id)} style={{ background: 'transparent', color: themeVars.textMuted, border: `1px solid ${themeVars.borderCol}`, borderRadius: '4px', padding: '2px 6px', cursor: 'pointer' }}>✖</button>
-                </div>
-              ))}
+            {/* ACTIVE PENALTIES LIST WITH MM:SS DIRECT TYPE INPUT BOXES */}
+            <div style={{ marginTop: '10px', maxHeight: '180px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+              {(state.penalties || []).map((p: Penalty) => {
+                const currentMins = Math.floor(p.time / 60);
+                const currentSecs = p.time % 60;
+
+                return (
+                  <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', background: themeVars.bgInput, color: themeVars.textColor, padding: '6px 10px', borderRadius: '4px', fontSize: '12px', alignItems: 'center', borderLeft: `3px solid ${p.team === 'away' ? '#007bff' : '#dc3545'}` }}>
+                    <span><strong>{p.team.toUpperCase()}</strong> #{p.plyr}</span>
+                    
+                    {/* Direct Type MM:SS Inputs */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      <input 
+                        type="number" 
+                        min="0" 
+                        max="99" 
+                        value={currentMins}
+                        onChange={(e) => {
+                          const newM = Math.max(0, parseInt(e.target.value) || 0);
+                          setExactPenaltyTime(p.id, newM, currentSecs);
+                        }}
+                        style={{ width: '42px', height: '26px', textAlign: 'center', fontSize: '12px', fontWeight: 'bold', borderRadius: '4px', padding: '2px' }}
+                      />
+                      <span style={{ fontWeight: 'bold' }}>:</span>
+                      <input 
+                        type="number" 
+                        min="0" 
+                        max="59" 
+                        value={currentSecs < 10 ? `0${currentSecs}` : currentSecs}
+                        onChange={(e) => {
+                          const newS = Math.min(59, Math.max(0, parseInt(e.target.value) || 0));
+                          setExactPenaltyTime(p.id, currentMins, newS);
+                        }}
+                        style={{ width: '42px', height: '26px', textAlign: 'center', fontSize: '12px', fontWeight: 'bold', borderRadius: '4px', padding: '2px' }}
+                      />
+                      <button onClick={() => removePenalty(p.id)} style={{ background: 'transparent', color: themeVars.textMuted, border: `1px solid ${themeVars.borderCol}`, borderRadius: '4px', padding: '2px 6px', cursor: 'pointer', marginLeft: '6px' }}>✖</button>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
 
             <hr style={{ borderColor: themeVars.borderCol, margin: '15px 0' }} />

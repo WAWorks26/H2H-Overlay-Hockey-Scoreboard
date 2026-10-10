@@ -87,14 +87,23 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
     }
   }
 
-  const isRollout = state.right_panel_mode?.startsWith('rollout');
-  const isDelayed = state.right_panel_mode === 'delayedPenalty';
-  const isAwayGoal = state.right_panel_mode === 'awayGoal';
-  const isHomeGoal = state.right_panel_mode === 'homeGoal';
-  const isGoal = isAwayGoal || isHomeGoal || state.right_panel_mode === 'goal';
-  const activeGoalComp = isAwayGoal ? 'awayGoal' : isHomeGoal ? 'homeGoal' : 'goal';
+  const currentMode = state.right_panel_mode || 'none';
+  const isRollout = currentMode.startsWith('rollout');
+  const isDelayed = currentMode === 'delayedPenalty';
+  const isAwayGoal = currentMode === 'awayGoal';
+  const isHomeGoal = currentMode === 'homeGoal';
+  const isGoal = isAwayGoal || isHomeGoal || currentMode === 'goal';
 
   const showRightPanel = isRollout || isDelayed || ppActive || isGoal;
+
+  // Dynamically resolve exact graphic key for each panel type
+  const activePanelKey = 
+    ppActive ? 'ppPanel' :
+    isAwayGoal ? 'awayGoal' :
+    isHomeGoal ? 'homeGoal' :
+    isGoal ? 'goal' :
+    isDelayed ? 'delayedPenalty' :
+    isRollout ? currentMode : 'rollout1';
 
   const getCompBackground = (compKey: string, fallbackColor: string) => {
     const bgType = gc[`${compKey}_bg_type`] || 'solid';
@@ -292,8 +301,6 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
       </div>
     );
   };
-
-  const activePanelKey = isGoal ? activeGoalComp : isDelayed ? 'delayedPenalty' : 'rollout1';
 
   return (
     <div 
@@ -505,14 +512,15 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
                   height: '100%', 
                   textAlign: 'center' 
                 }}>
+                  {renderCompMedia(activePanelKey)}
                   {ppActive ? (
-                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', position: 'relative', zIndex: 1 }}>
                       <span style={{ fontSize: '12px', textTransform: 'uppercase', marginBottom: '2px', lineHeight: 1 }}>{ppSituationStr || `${ppTeam} PP`}</span>
                       <span style={{ fontSize: '30px', lineHeight: 1 }}>{ppTimeStr}</span>
                     </div>
                   ) : (
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-                      <span style={{ fontSize: '20px', lineHeight: 1 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', position: 'relative', zIndex: 1 }}>
+                      <span style={{ fontSize: '20px', lineHeight: 1, transform: getTextSkewTransform(activePanelKey) }}>
                         {isDelayed && 'DELAYED PENALTY'}
                         {(isRollout || isGoal) && state.right_panel_text}
                       </span>
@@ -660,9 +668,12 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
                   justifyContent: 'center', 
                   height: '100%' 
                 }}>
-                  {ppActive && `${ppTeam} PP ${ppTimeStr}`}
-                  {isDelayed && 'DELAYED PENALTY'}
-                  {(isRollout || isGoal) && state.right_panel_text}
+                  {renderCompMedia(activePanelKey)}
+                  <span style={{ position: 'relative', zIndex: 1, transform: getTextSkewTransform(activePanelKey) }}>
+                    {ppActive && `${ppTeam} PP ${ppTimeStr}`}
+                    {isDelayed && 'DELAYED PENALTY'}
+                    {(isRollout || isGoal) && state.right_panel_text}
+                  </span>
                 </div>
               )}
             </div>
