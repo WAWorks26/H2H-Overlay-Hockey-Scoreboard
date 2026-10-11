@@ -40,17 +40,32 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
   const stateRef = useRef(state);
   stateRef.current = state;
   const channelRef = useRef<any>(null);
+  const localChannelRef = useRef<BroadcastChannel | null>(null);
   const debounceTimer = useRef<NodeJS.Timeout | null>(null);
   const rolloutTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const bannerTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     const channel = supabase.channel(`scoreboard_${id}`, { config: { broadcast: { self: false } } });
     channel.subscribe();
     channelRef.current = channel;
-    return () => { supabase.removeChannel(channel); };
+
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      localChannelRef.current = new BroadcastChannel(`scoreboard_local_${id}`);
+    }
+
+    return () => { 
+      supabase.removeChannel(channel);
+      if (localChannelRef.current) {
+        localChannelRef.current.close();
+      }
+    };
   }, [id]);
 
   const broadcastState = async (updatedState: any) => {
+    if (localChannelRef.current) {
+      localChannelRef.current.postMessage(updatedState);
+    }
     if (channelRef.current) {
       await channelRef.current.send({
         type: 'broadcast',
@@ -352,7 +367,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     alert(`Pasted settings onto [${selectedComp}]!`);
   };
 
-  // UI Theme Palettes
   const currentTheme = getGVar('uiTheme', 'Light');
   const isLight = currentTheme === 'Light';
   const isConcrete = currentTheme === 'Concrete';
@@ -401,10 +415,13 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
   };
 
   const triggerRolloutWithAutoHide = (modeName: string, textValue: string) => {
-    if (rolloutTimerRef.current) clearTimeout(rolloutTimerRef.current);
+    if (rolloutTimerRef.current) {
+      clearTimeout(rolloutTimerRef.current);
+      rolloutTimerRef.current = null;
+    }
 
-    const autoHide = getGVar('rollout_autohide', true);
-    const duration = parseInt(getGVar('rollout_duration', '5')) || 5;
+    const autoHide = getGVar(`${modeName}_autohide`, true) === true;
+    const duration = parseInt(getGVar(`${modeName}_duration`, '5')) || 5;
 
     updateField('right_panel_mode', modeName);
     updateField('right_panel_text', textValue);
@@ -444,24 +461,48 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     const newMode = isActivating ? modeName : 'none';
     const txt = getGVar(`rollout${num}_text`, `ROLLOUT ${num}`);
     
-    triggerRolloutWithAutoHide(newMode, txt);
+    if (newMode === 'none') {
+      if (rolloutTimerRef.current) clearTimeout(rolloutTimerRef.current);
+      updateField('right_panel_mode', 'none');
+    } else {
+      triggerRolloutWithAutoHide(newMode, txt);
+    }
   };
 
   const triggerDelayedPenalty = async () => {
     const currentState = stateRef.current;
     if (!currentState) return;
     const newMode = currentState.right_panel_mode === 'delayedPenalty' ? 'none' : 'delayedPenalty';
-    triggerRolloutWithAutoHide(newMode, 'DELAYED PENALTY');
+    if (newMode === 'none') {
+      if (rolloutTimerRef.current) clearTimeout(rolloutTimerRef.current);
+      updateField('right_panel_mode', 'none');
+    } else {
+      triggerRolloutWithAutoHide(newMode, 'DELAYED PENALTY');
+    }
   };
 
   const triggerBanner = async () => {
     const currentState = stateRef.current;
     if (!currentState) return;
+
+    if (bannerTimerRef.current) {
+      clearTimeout(bannerTimerRef.current);
+      bannerTimerRef.current = null;
+    }
+
     const isActive = !currentState.banner_active;
     const txt = getGVar('banner_text', "FULL WIDTH BANNER");
-    
+    const autoHide = getGVar('banner_autohide', true) === true;
+    const duration = parseInt(getGVar('banner_duration', '5')) || 5;
+
     updateField('banner_active', isActive);
     updateField('banner_text', txt);
+
+    if (isActive && autoHide) {
+      bannerTimerRef.current = setTimeout(() => {
+        updateField('banner_active', false);
+      }, duration * 1000);
+    }
   };
 
   useEffect(() => {
@@ -778,7 +819,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
   const currentImgX = getGVar(`${selectedComp}_img_x`, '0');
   const currentImgY = getGVar(`${selectedComp}_img_y`, '0');
   
-  // Media Global Skew
   const mediaUseGlobalSkew = getGVar(`${selectedComp}_use_global_skew`, false);
   const globalSkewVal = getGVar('skewAngle', '0');
   const mediaComputedSkew = mediaUseGlobalSkew ? globalSkewVal : '0';
@@ -790,6 +830,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     color: themeVars.textColor,
     borderColor: themeVars.borderCol
   };
+
+  const isRolloutElement = ['rollout1', 'rollout2', 'rollout3', 'awayGoal', 'homeGoal', 'delayedPenalty', 'banner'].includes(selectedComp);
 
   const renderHotkeyRow = (label: string, actionKey: string) => {
     const currentVal = hotkeysConfig[actionKey] || '';
@@ -840,14 +882,14 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     <div id="control-panel" style={{ backgroundColor: themeVars.bgPage, color: themeVars.textColor, minHeight: '100vh' }}>
       
       <style>{`
-        body, html { background-color: ${themeVars.bgPage} !important; color: ${themeVars.textColor} !important; }
-        #control-panel .box { background-color: ${themeVars.bgBox} !important; border-color: ${themeVars.borderCol} !important; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
+        body, html { background-color: ${themeVars.bgPage} !important; color:${themeVars.textColor} !important; }
+        #control-panel .box { background-color: ${themeVars.bgBox} !important; border-color:${themeVars.borderCol} !important; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
         #control-panel .box h3, #control-panel .box label { color: ${themeVars.headerTextCol} !important; }
-        #control-panel input, #control-panel select { background-color: ${themeVars.bgInput} !important; color: ${themeVars.textColor} !important; border-color: ${themeVars.borderCol} !important; }
-        #control-panel .tab-headers { background-color: ${themeVars.tabHeaderBg} !important; border-bottom-color: ${themeVars.borderCol} !important; }
+        #control-panel input, #control-panel select { background-color: ${themeVars.bgInput} !important; color: ${themeVars.textColor} !important; border-color:${themeVars.borderCol} !important; }
+        #control-panel .tab-headers { background-color: ${themeVars.tabHeaderBg} !important; border-bottom-color:${themeVars.borderCol} !important; }
         #control-panel .tab-btn { color: ${themeVars.tabInactiveText} !important; font-weight: bold; border: none; padding: 12px 20px; cursor: pointer; transition: background 0.15s ease; }
         #control-panel .tab-btn:hover:not(.active) { background-color: ${isLight ? '#c9cfd8' : '#3a404a'} !important; color: ${isLight ? '#1c2431' : '#ffffff'} !important; }
-        #control-panel .tab-btn.active { background-color: ${themeVars.tabActiveBg} !important; color: ${themeVars.tabActiveText} !important; border-bottom: 3px solid #FF5100; }
+        #control-panel .tab-btn.active { background-color: ${themeVars.tabActiveBg} !important; color:${themeVars.tabActiveText} !important; border-bottom: 3px solid #FF5100; }
         
         #control-panel .btn {
           border-radius: 8px !important;
@@ -868,7 +910,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
         #control-panel .btn-red { background: linear-gradient(180deg, #f85b5b 0%, #c92a2a 100%) !important; color: #ffffff !important; }
         #control-panel .btn-purple { background: linear-gradient(180deg, #a073f8 0%, #6d38d9 100%) !important; color: #ffffff !important; }
         #control-panel .btn-secondary-theme { 
-          background: linear-gradient(180deg, ${isLight ? '#FFFFFF' : '#636a75'} 0%, ${isLight ? '#E1E5E9' : '#454a52'} 100%) !important; 
+          background: linear-gradient(180deg, ${isLight ? '#FFFFFF' : '#636a75'} 0\%, ${isLight ? '#E1E5E9' : '#454a52'} 100%) !important; 
           color: ${themeVars.btnSecondaryText} !important; 
           border: 1px solid ${themeVars.btnSecondaryBorder} !important; 
         }
@@ -1145,7 +1187,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
               />
             </div>
 
-            {/* AUTOMATIC CLOCK RESET ON GAME PHASE CHANGE */}
             <div className="row" style={{ marginTop: '10px' }}>
               <label>Game Phase:</label>
               <select value={state.period} onChange={(e) => handlePeriodChange(e.target.value)} style={selectStyle}>
@@ -1219,7 +1260,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             </div>
             <div className="row"><button className="btn btn-orange" style={{ borderRadius: '6px' }} onClick={() => updateField('penalties', [])}>CLEAR ALL PENALTIES</button></div>
             
-            {/* ACTIVE PENALTIES LIST WITH MM:SS DIRECT TYPE INPUT BOXES */}
             <div style={{ marginTop: '10px', maxHeight: '180px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '6px' }}>
               {(state.penalties || []).map((p: Penalty) => {
                 const currentMins = Math.floor(p.time / 60);
@@ -1229,7 +1269,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                   <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', background: themeVars.bgInput, color: themeVars.textColor, padding: '6px 10px', borderRadius: '4px', fontSize: '12px', alignItems: 'center', borderLeft: `3px solid ${p.team === 'away' ? '#007bff' : '#dc3545'}` }}>
                     <span><strong>{p.team.toUpperCase()}</strong> #{p.plyr}</span>
                     
-                    {/* Direct Type MM:SS Inputs */}
                     <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                       <input 
                         type="number" 
@@ -1263,30 +1302,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
 
             <hr style={{ borderColor: themeVars.borderCol, margin: '15px 0' }} />
             
-            {/* ROLLOUT CONTROLS WITH AUTO HIDE TOGGLE AND DURATION */}
-            <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <input 
-                  type="checkbox" 
-                  id="chk-autohide"
-                  checked={getGVar('rollout_autohide', true)}
-                  onChange={(e) => updateGraphicVar('rollout_autohide', e.target.checked, true)}
-                />
-                <label htmlFor="chk-autohide" style={{ fontSize: '12px', cursor: 'pointer' }}>Auto Hide Rollout</label>
-              </div>
-
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                <label style={{ fontSize: '12px' }}>Secs:</label>
-                <input 
-                  type="number" 
-                  min="1" max="60"
-                  value={getGVar('rollout_duration', '5')}
-                  onChange={(e) => updateGraphicVar('rollout_duration', e.target.value, true)}
-                  style={{ width: '45px', textAlign: 'center', padding: '2px 4px' }}
-                />
-              </div>
-            </div>
-
             <div className="row" style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '12px' }}>
               <input 
                 type="checkbox" 
@@ -1507,7 +1522,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             </div>
           </div>
 
-          {/* COMPONENT EDITOR WITH SEPARATE AWAY/HOME GOAL ROLLOUT ELEMENTS */}
+          {/* COMPONENT EDITOR WITH INDIVIDUAL ROLLOUT & BANNER AUTO-HIDE CONTROLS */}
           <div className="box" style={{ flex: '2 1 600px', borderColor: '#007bff' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #007bff', paddingBottom: '10px', marginBottom: '15px', flexWrap: 'wrap', gap: '10px' }}>
               <h3 style={{ border: 'none', margin: 0, padding: 0 }}>COMPONENT EDITOR</h3>
@@ -1594,6 +1609,36 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
               
               <div style={{ flex: '1 1 250px' }}>
                 
+                {/* INDIVIDUAL AUTO HIDE CONTROLS FOR ROLLOUT & BANNER ELEMENTS */}
+                {isRolloutElement && (
+                  <div style={{ background: themeVars.bgInput, padding: '10px', borderRadius: '6px', marginBottom: '12px', border: `1px solid ${themeVars.borderCol}` }}>
+                    <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <input 
+                          type="checkbox" 
+                          id={`chk-autohide-${selectedComp}`}
+                          checked={getGVar(`${selectedComp}_autohide`, true)}
+                          onChange={(e) => updateGraphicVar(`${selectedComp}_autohide`, e.target.checked, true)}
+                        />
+                        <label htmlFor={`chk-autohide-${selectedComp}`} style={{ fontSize: '12px', cursor: 'pointer', fontWeight: 'bold' }}>
+                          Auto Hide {selectedComp === 'banner' ? 'Banner' : 'Rollout'}
+                        </label>
+                      </div>
+
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <label style={{ fontSize: '12px' }}>Secs:</label>
+                        <input 
+                          type="number" 
+                          min="1" max="60"
+                          value={getGVar(`${selectedComp}_duration`, '5')}
+                          onChange={(e) => updateGraphicVar(`${selectedComp}_duration`, e.target.value, true)}
+                          style={{ width: '45px', textAlign: 'center', padding: '2px 4px' }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {/* TEXT COLOR ROW */}
                 <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                   <label>Text Color:</label>
@@ -1689,6 +1734,60 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                   </div>
                 </div>
 
+                <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+                  <label>Text Animation Effect:</label>
+                  <select 
+                    value={getGVar(`${selectedComp}_text_anim`, 'none')} 
+                    onChange={(e) => updateGraphicVar(`${selectedComp}_text_anim`, e.target.value, true)}
+                    style={selectStyle}
+                  >
+                    <option value="none" style={selectStyle}>None (Static)</option>
+                    <option value="wipeLeft" style={selectStyle}>Wipe Left</option>
+                    <option value="wipeRight" style={selectStyle}>Wipe Right</option>
+                    <option value="wipeUp" style={selectStyle}>Wipe Up</option>
+                    <option value="wipeDown" style={selectStyle}>Wipe Down</option>
+                    <option value="fadeIn" style={selectStyle}>Fade In</option>
+                    <option value="fadeOut" style={selectStyle}>Fade Out</option>
+                    <option value="zoomIn" style={selectStyle}>Zoom In</option>
+                    <option value="zoomOut" style={selectStyle}>Zoom Out</option>
+                    <option value="typewriter" style={selectStyle}>Typewriter (Centered)</option>
+                    <option value="glitchTypewriter" style={selectStyle}>Glitch Typewriter</option>
+                    <option value="spinInLeft" style={selectStyle}>Spin In Left</option>
+                    <option value="spinInRight" style={selectStyle}>Spin In Right</option>
+                    <option value="pushLeft" style={selectStyle}>Push Left</option>
+                    <option value="pushRight" style={selectStyle}>Push Right</option>
+                    <option value="pushUp" style={selectStyle}>Push Up</option>
+                    <option value="pushDown" style={selectStyle}>Push Down</option>
+                    <option value="randomFlash" style={selectStyle}>Random Flash</option>
+                    <option value="enlarge" style={selectStyle}>Enlarge</option>
+                    <option value="rightInsert" style={selectStyle}>Right Insert</option>
+                    <option value="leftInsert" style={selectStyle}>Left Insert</option>
+                    <option value="blurLeft" style={selectStyle}>Blur Left</option>
+                    <option value="blurRight" style={selectStyle}>Blur Right</option>
+                  </select>
+                </div>
+
+                {getGVar(`${selectedComp}_text_anim`, 'none') !== 'none' && (
+                  <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+                    <label>Anim Duration (s):</label>
+                    <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <input 
+                        type="range" min="0.2" max="3.0" step="0.1" 
+                        value={getGVar(`${selectedComp}_text_anim_dur`, '0.6')} 
+                        onChange={(e) => updateGraphicVar(`${selectedComp}_text_anim_dur`, e.target.value, false, true)} 
+                        onMouseUp={() => pushHistory(state?.graphics_config)}
+                        onTouchEnd={() => pushHistory(state?.graphics_config)}
+                      />
+                      <input 
+                        type="number" className="sync-num" step="0.1"
+                        value={getGVar(`${selectedComp}_text_anim_dur`, '0.6')} 
+                        onChange={(e) => updateGraphicVar(`${selectedComp}_text_anim_dur`, e.target.value)} 
+                        style={{ width: '55px', height: '32px', textAlign: 'center' }}
+                      />
+                    </div>
+                  </div>
+                )}
+
                 {/* TEXT SKEW */}
                 <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                   <label>Text Skew °:</label>
@@ -1766,6 +1865,19 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
 
                 <hr style={{ borderColor: themeVars.borderCol, margin: '15px 0' }} />
 
+                {/* UPDATED LAYER SYSTEM OPTIONS */}
+                <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+                  <label>Layer System:</label>
+                  <select 
+                    value={getGVar(`${selectedComp}_layer_order`, 'mediaBelow')} 
+                    onChange={(e) => updateGraphicVar(`${selectedComp}_layer_order`, e.target.value, true)}
+                    style={selectStyle}
+                  >
+                    <option value="mediaBelow" style={selectStyle}>Foreground Layer (color/gradient in front of media)</option>
+                    <option value="gradientBelow" style={selectStyle}>Background Layer (color/gradient behind media)</option>
+                  </select>
+                </div>
+
                 <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                   <label>Background Type:</label>
                   <select 
@@ -1781,59 +1893,81 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                   </select>
                 </div>
 
+                {/* INDEPENDENT COLOR ALPHA SLIDERS FOR EACH BACKGROUND COLOR */}
                 {bgType !== 'clear' && (
-                  <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
-                    <label>BG Color 1 (Left):</label>
-                    <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      <input 
-                        type="color" 
-                        value={
-                          selectedComp === 'awayTeam' ? state.away_color || getGVar('awayTeam_bg_color', '#00468b') :
-                          selectedComp === 'homeTeam' ? state.home_color || getGVar('homeTeam_bg_color', '#222222') :
-                          getGVar(`${selectedComp}_bg_color`, '#111111')
-                        } 
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          if (selectedComp === 'awayTeam') {
-                            updateField('away_color', val);
-                            updateGraphicVar('awayTeam_bg_color', val, true);
-                          } else if (selectedComp === 'homeTeam') {
-                            updateField('home_color', val);
-                            updateGraphicVar('homeTeam_bg_color', val, true);
-                          } else {
-                            updateGraphicVar(`${selectedComp}_bg_color`, val, true);
-                          }
-                        }} 
-                        style={{ width: '32px', height: '32px', padding: 0, cursor: 'pointer', border: 'none', borderRadius: '4px' }}
-                      />
-                      <input 
-                        type="text" 
-                        value={
-                          selectedComp === 'awayTeam' ? state.away_color || getGVar('awayTeam_bg_color', '#00468b') :
-                          selectedComp === 'homeTeam' ? state.home_color || getGVar('homeTeam_bg_color', '#222222') :
-                          getGVar(`${selectedComp}_bg_color`, '#111111')
-                        } 
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          if (selectedComp === 'awayTeam') {
-                            updateField('away_color', val);
-                            updateGraphicVar('awayTeam_bg_color', val, true);
-                          } else if (selectedComp === 'homeTeam') {
-                            updateField('home_color', val);
-                            updateGraphicVar('homeTeam_bg_color', val, true);
-                          } else {
-                            updateGraphicVar(`${selectedComp}_bg_color`, val, true);
-                          }
-                        }} 
-                        style={{ width: '85px', height: '32px', fontFamily: 'monospace', textAlign: 'center', padding: '4px' }}
-                      />
+                  <>
+                    <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+                      <label>BG Color 1 (Left):</label>
+                      <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <input 
+                          type="color" 
+                          value={
+                            selectedComp === 'awayTeam' ? state.away_color || getGVar('awayTeam_bg_color', '#00468b') :
+                            selectedComp === 'homeTeam' ? state.home_color || getGVar('homeTeam_bg_color', '#222222') :
+                            getGVar(`${selectedComp}_bg_color`, '#111111')
+                          } 
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            if (selectedComp === 'awayTeam') {
+                              updateField('away_color', val);
+                              updateGraphicVar('awayTeam_bg_color', val, true);
+                            } else if (selectedComp === 'homeTeam') {
+                              updateField('home_color', val);
+                              updateGraphicVar('homeTeam_bg_color', val, true);
+                            } else {
+                              updateGraphicVar(`${selectedComp}_bg_color`, val, true);
+                            }
+                          }} 
+                          style={{ width: '32px', height: '32px', padding: 0, cursor: 'pointer', border: 'none', borderRadius: '4px' }}
+                        />
+                        <input 
+                          type="text" 
+                          value={
+                            selectedComp === 'awayTeam' ? state.away_color || getGVar('awayTeam_bg_color', '#00468b') :
+                            selectedComp === 'homeTeam' ? state.home_color || getGVar('homeTeam_bg_color', '#222222') :
+                            getGVar(`${selectedComp}_bg_color`, '#111111')
+                          } 
+                          onChange={(e) => {
+                            const val = e.target.value;
+                            if (selectedComp === 'awayTeam') {
+                              updateField('away_color', val);
+                              updateGraphicVar('awayTeam_bg_color', val, true);
+                            } else if (selectedComp === 'homeTeam') {
+                              updateField('home_color', val);
+                              updateGraphicVar('homeTeam_bg_color', val, true);
+                            } else {
+                              updateGraphicVar(`${selectedComp}_bg_color`, val, true);
+                            }
+                          }} 
+                          style={{ width: '85px', height: '32px', fontFamily: 'monospace', textAlign: 'center', padding: '4px' }}
+                        />
+                      </div>
                     </div>
-                  </div>
+
+                    <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+                      <label>Color 1 Alpha %:</label>
+                      <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <input 
+                          type="range" min="0" max="100" 
+                          value={getGVar(`${selectedComp}_col1_alpha`, '100')} 
+                          onChange={(e) => updateGraphicVar(`${selectedComp}_col1_alpha`, e.target.value, false, true)} 
+                          onMouseUp={() => pushHistory(state?.graphics_config)}
+                          onTouchEnd={() => pushHistory(state?.graphics_config)}
+                        />
+                        <input 
+                          type="number" className="sync-num" 
+                          value={getGVar(`${selectedComp}_col1_alpha`, '100')} 
+                          onChange={(e) => updateGraphicVar(`${selectedComp}_col1_alpha`, e.target.value)} 
+                          style={{ width: '55px', height: '32px', textAlign: 'center' }}
+                        />
+                      </div>
+                    </div>
+                  </>
                 )}
 
                 {bgType === 'linear3' && (
                   <>
-                    <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+                    <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
                       <label>BG Color 2 (Mid):</label>
                       <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                         <input 
@@ -1847,6 +1981,25 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                           value={getGVar(`${selectedComp}_bg_col3`, '#888888')} 
                           onChange={(e) => updateGraphicVar(`${selectedComp}_bg_col3`, e.target.value, true)} 
                           style={{ width: '85px', height: '32px', fontFamily: 'monospace', textAlign: 'center', padding: '4px' }}
+                        />
+                      </div>
+                    </div>
+
+                    <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+                      <label>Color 2 Alpha %:</label>
+                      <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <input 
+                          type="range" min="0" max="100" 
+                          value={getGVar(`${selectedComp}_col3_alpha`, '100')} 
+                          onChange={(e) => updateGraphicVar(`${selectedComp}_col3_alpha`, e.target.value, false, true)} 
+                          onMouseUp={() => pushHistory(state?.graphics_config)}
+                          onTouchEnd={() => pushHistory(state?.graphics_config)}
+                        />
+                        <input 
+                          type="number" className="sync-num" 
+                          value={getGVar(`${selectedComp}_col3_alpha`, '100')} 
+                          onChange={(e) => updateGraphicVar(`${selectedComp}_col3_alpha`, e.target.value)} 
+                          style={{ width: '55px', height: '32px', textAlign: 'center' }}
                         />
                       </div>
                     </div>
@@ -1892,23 +2045,44 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                 )}
 
                 {(bgType === 'linear' || bgType === 'linear3' || bgType === 'radial') && (
-                  <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
-                    <label>{bgType === 'linear3' ? 'BG Color 3 (Right):' : 'BG Color 2 (Right):'}</label>
-                    <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      <input 
-                        type="color" 
-                        value={getGVar(`${selectedComp}_bg_col2`, '#000000')} 
-                        onChange={(e) => updateGraphicVar(`${selectedComp}_bg_col2`, e.target.value, true)} 
-                        style={{ width: '32px', height: '32px', padding: 0, cursor: 'pointer', border: 'none', borderRadius: '4px' }}
-                      />
-                      <input 
-                        type="text" 
-                        value={getGVar(`${selectedComp}_bg_col2`, '#000000')} 
-                        onChange={(e) => updateGraphicVar(`${selectedComp}_bg_col2`, e.target.value, true)} 
-                        style={{ width: '85px', height: '32px', fontFamily: 'monospace', textAlign: 'center', padding: '4px' }}
-                      />
+                  <>
+                    <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+                      <label>{bgType === 'linear3' ? 'BG Color 3 (Right):' : 'BG Color 2 (Right):'}</label>
+                      <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <input 
+                          type="color" 
+                          value={getGVar(`${selectedComp}_bg_col2`, '#000000')} 
+                          onChange={(e) => updateGraphicVar(`${selectedComp}_bg_col2`, e.target.value, true)} 
+                          style={{ width: '32px', height: '32px', padding: 0, cursor: 'pointer', border: 'none', borderRadius: '4px' }}
+                        />
+                        <input 
+                          type="text" 
+                          value={getGVar(`${selectedComp}_bg_col2`, '#000000')} 
+                          onChange={(e) => updateGraphicVar(`${selectedComp}_bg_col2`, e.target.value, true)} 
+                          style={{ width: '85px', height: '32px', fontFamily: 'monospace', textAlign: 'center', padding: '4px' }}
+                        />
+                      </div>
                     </div>
-                  </div>
+
+                    <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+                      <label>{bgType === 'linear3' ? 'Color 3 Alpha %:' : 'Color 2 Alpha %:'}</label>
+                      <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <input 
+                          type="range" min="0" max="100" 
+                          value={getGVar(`${selectedComp}_col2_alpha`, '100')} 
+                          onChange={(e) => updateGraphicVar(`${selectedComp}_col2_alpha`, e.target.value, false, true)} 
+                          onMouseUp={() => pushHistory(state?.graphics_config)}
+                          onTouchEnd={() => pushHistory(state?.graphics_config)}
+                        />
+                        <input 
+                          type="number" className="sync-num" 
+                          value={getGVar(`${selectedComp}_col2_alpha`, '100')} 
+                          onChange={(e) => updateGraphicVar(`${selectedComp}_col2_alpha`, e.target.value)} 
+                          style={{ width: '55px', height: '32px', textAlign: 'center' }}
+                        />
+                      </div>
+                    </div>
+                  </>
                 )}
 
                 {(bgType === 'linear' || bgType === 'linear3') && (
@@ -1934,7 +2108,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
 
                 {bgType !== 'clear' && (
                   <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
-                    <label>BG Transparency:</label>
+                    <label>Box Overall Transparency:</label>
                     <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                       <input 
                         type="range" min="0" max="100" 
@@ -1984,7 +2158,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                             style={{ 
                               width: '100%', height: '100%', objectFit: 'contain', position: 'absolute', top: 0, left: 0,
                               opacity: parseFloat(currentImgAlpha) / 100,
-                              transform: `translate(${currentImgX}%, ${currentImgY}%) scale(${parseFloat(currentImgScale) / 100}) skewX(${mediaComputedSkew}deg)`
+                              transform: `translate(${currentImgX}\%,${currentImgY}%) scale(${parseFloat(currentImgScale) / 100}) skewX(${mediaComputedSkew}deg)`
                             }} 
                           />
                         ) : (
@@ -1994,7 +2168,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                             style={{ 
                               width: '100%', height: '100%', objectFit: 'contain', position: 'absolute', top: 0, left: 0,
                               opacity: parseFloat(currentImgAlpha) / 100,
-                              transform: `translate(${currentImgX}%, ${currentImgY}%) scale(${parseFloat(currentImgScale) / 100}) skewX(${mediaComputedSkew}deg)`
+                              transform: `translate(${currentImgX}\%,${currentImgY}%) scale(${parseFloat(currentImgScale) / 100}) skewX(${mediaComputedSkew}deg)`
                             }} 
                           />
                         )}
@@ -2143,7 +2317,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
               {renderHotkeyRow('Trigger Rollout 1:', 'triggerRollout1')}
               {renderHotkeyRow('Trigger Rollout 2:', 'triggerRollout2')}
               {renderHotkeyRow('Trigger Rollout 3:', 'triggerRollout3')}
-              {renderHotkeyRow('Delayed Penalty:', 'triggerDelayedPenalty')}
+              {renderHotkeyRow('Trigger Delayed Penalty:', 'triggerDelayedPenalty')}
               {renderHotkeyRow('Trigger Banner:', 'triggerBanner')}
             </div>
             <div className="box">
@@ -2224,12 +2398,10 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             </div>
           </div>
 
-          {/* JSON FILE EXPORT / IMPORT WITH ACTIVE FOLDER & EVENT NAMING */}
           <div className="box">
             <h3>JSON FILE EXPORT / IMPORT</h3>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
               
-              {/* Event / Profile Save As Name Input */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
                 <label style={{ fontSize: '12px', fontWeight: 'bold' }}>Save As (Event / Profile Name):</label>
                 <input 
@@ -2241,7 +2413,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                 />
               </div>
 
-              {/* Folder Selector & Active Folder Name Status */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
                 <div style={{ display: 'flex', gap: '8px' }}>
                   <button 
@@ -2274,7 +2445,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                 </div>
               </div>
 
-              {/* Action Buttons */}
               <div style={{ display: 'flex', gap: '12px', marginTop: '4px' }}>
                 <button 
                   onClick={exportProfileJSON} 
