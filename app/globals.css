@@ -314,3 +314,52 @@ button.bg-gray { border-color: #ffffff !important; color: #ccc !important; }
 button.bg-gray:hover { background: rgba(255, 255, 255, 0.1) !important; }
 .box { background: #171717 !important; border: 1px solid #2a2a2a !important; box-shadow: 0 4px 6px rgba(0,0,0,0.2) !important; }
 .box h3 { color: #888 !important; border-bottom: 1px solid #222 !important; }
+
+
+/* ==========================================================================
+   GLOBAL SCOREBOARD & ROLLOUT ANIMATION KEYFRAMES
+   ========================================================================== */
+
+/* ROLLOUT ENTER AND RETRACT ANIMATIONS */
+@keyframes animRolloutShowFromLeft {
+  from { clip-path: polygon(0 0, 0 0, 0 100%, 0 100%); }
+  to { clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%); }
+}
+
+@keyframes animRolloutRetractToLeft {
+  from { clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%); }
+  to { clip-path: polygon(0 0, 0 0, 0 100%, 0 100%); }
+}
+
+/* TEXT ANIMATION EFFECTS */
+@keyframes animWipeLeft { from { clip-path: inset(0 0 0 100%); } to { clip-path: inset(0 0 0 0); } }
+@keyframes animWipeRight { from { clip-path: inset(0 100% 0 0); } to { clip-path: inset(0 0 0 0); } }
+@keyframes animWipeUp { from { clip-path: inset(100% 0 0 0); } to { clip-path: inset(0 0 0 0); } }
+@keyframes animWipeDown { from { clip-path: inset(0 0 100% 0); } to { clip-path: inset(0 0 0 0); } }
+
+@keyframes animFadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes animFadeOut { from { opacity: 1; } to { opacity: 0; } }
+
+@keyframes animZoomIn { from { opacity: 0; transform: scale(0.2); } to { opacity: 1; transform: scale(1); } }
+@keyframes animZoomOut { from { opacity: 1; transform: scale(1); } to { opacity: 0; transform: scale(2.2); } }
+
+@keyframes animTypewriter { from { max-width: 0; } to { max-width: 100%; } }
+@keyframes animGlitch { 0% { opacity: 0; transform: translate(-4px, 2px); } 50% { opacity: 0.8; transform: translate(3px, -2px); } 100% { opacity: 1; transform: translate(0, 0); } }
+@keyframes animGlitchFlicker { 0% { text-shadow: 2px 0 red, -2px 0 blue; } 50% { text-shadow: -2px 0 red, 2px 0 blue; } 100% { text-shadow: 0 0 transparent; } }
+
+@keyframes animSpinInLeft { from { opacity: 0; transform: translateX(-120%) rotate(-180deg); } to { opacity: 1; transform: translateX(0) rotate(0deg); } }
+@keyframes animSpinInRight { from { opacity: 0; transform: translateX(120%) rotate(180deg); } to { opacity: 1; transform: translateX(0) rotate(0deg); } }
+
+@keyframes animPushLeft { from { opacity: 0; transform: translateX(100%); } to { opacity: 1; transform: translateX(0); } }
+@keyframes animPushRight { from { opacity: 0; transform: translateX(-100%); } to { opacity: 1; transform: translateX(0); } }
+@keyframes animPushUp { from { opacity: 0; transform: translateY(100%); } to { opacity: 1; transform: translateY(0); } }
+@keyframes animPushDown { from { opacity: 0; transform: translateY(-100%); } to { opacity: 1; transform: translateY(0); } }
+
+@keyframes animRandomFlash { 0% { opacity: 0; filter: brightness(2); } 20% { opacity: 1; filter: brightness(1); } 40% { opacity: 0.1; } 60% { opacity: 1; filter: brightness(1.5); } 80% { opacity: 0.3; } 100% { opacity: 1; filter: brightness(1); } }
+@keyframes animEnlarge { 0% { opacity: 0; transform: scale(0.1); } 80% { transform: scale(1.15); } 100% { opacity: 1; transform: scale(1); } }
+
+@keyframes animRightInsert { from { clip-path: polygon(100% 0, 100% 0, 100% 100%, 100% 100%); transform: translateX(30px); } to { clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%); transform: translateX(0); } }
+@keyframes animLeftInsert { from { clip-path: polygon(0 0, 0 0, 0 100%, 0 100%); transform: translateX(-30px); } to { clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%); transform: translateX(0); } }
+
+@keyframes animBlurLeft { from { opacity: 0; transform: translateX(-100px); filter: blur(20px); } to { opacity: 1; transform: translateX(0); filter: blur(0px); } }
+@keyframes animBlurRight { from { opacity: 0; transform: translateX(100px); filter: blur(20px); } to { opacity: 1; transform: translateX(0); filter: blur(0px); } }
