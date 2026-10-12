@@ -77,7 +77,10 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
 
   useEffect(() => {
     const fetchState = async () => {
-      const { data, error } = await supabase.from('scoreboards').select('*').eq('id', id).single();
+      // Sanitize non-hex characters (like 'g') to ensure valid Postgres UUID syntax
+      const validUuid = id.replace(/[^0-9a-fA-F-]/g, '1');
+
+      const { data, error } = await supabase.from('scoreboards').select('*').eq('id', validUuid).single();
       if (error) console.error("Supabase Error:", error.message);
       if (data) {
         const initialConfig = data.graphics_config || {};
@@ -307,7 +310,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     return state?.graphics_config?.[key] ?? fallback;
   };
 
-  // HELPER TO READ FRESH CONFIG VALUES DIRECTLY FROM STATEREF AT RUNTIME
   const getRefGVar = (key: string, fallback: any = '') => {
     return stateRef.current?.graphics_config?.[key] ?? fallback;
   };
@@ -419,7 +421,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     updateGraphicVar('hotkeys', cleared, true);
   };
 
-  // DYNAMIC AUTO-HIDE TRIGGER (ALWAYS READS LIVE DYNAMIC GRAPHICS_CONFIG)
   const triggerRolloutWithAutoHide = (modeName: string, textValue: string) => {
     if (rolloutTimerRef.current) {
       clearTimeout(rolloutTimerRef.current);
@@ -453,7 +454,24 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
         const teamName = team === 'away' ? (prev.away_name || 'AWAY') : (prev.home_name || 'HOME');
         const goalText = getRefGVar('goal_text_format', 'GOAL {TEAM}').replace('{TEAM}', teamName);
         const mode = team === 'away' ? 'awayGoal' : 'homeGoal';
-        triggerRolloutWithAutoHide(mode, goalText);
+
+        if (rolloutTimerRef.current) {
+          clearTimeout(rolloutTimerRef.current);
+          rolloutTimerRef.current = null;
+        }
+
+        const autoHideSetting = getRefGVar(`${mode}_autohide`, getRefGVar('rollout1_autohide', true));
+        const autoHide = autoHideSetting === true || autoHideSetting === 'true';
+        const duration = parseInt(getRefGVar(`${mode}_duration`, getRefGVar('rollout1_duration', '3'))) || 3;
+
+        updateField('right_panel_mode', mode);
+        updateField('right_panel_text', goalText);
+
+        if (autoHide) {
+          rolloutTimerRef.current = setTimeout(() => {
+            updateField('right_panel_mode', 'none');
+          }, duration * 1000);
+        }
       }
 
       return updated;
@@ -488,7 +506,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     }
   };
 
-  // FULL WIDTH BANNER DYNAMIC AUTO HIDE TRIGGER
   const triggerBanner = async () => {
     const currentState = stateRef.current;
     if (!currentState) return;
@@ -1119,7 +1136,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
 
             {/* HOME TEAM BLOCK WITH RIGHT PENALTIES */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
-              <div style={{ fontSize: '32px', fontWeight: '900', color: themeVars.textColor, minWidth: '24px', textAlign: 'center' }}>
+              <div style={{ fontSize: '32px', fontWeight: '900', color themeVars.textColor, minWidth: '24px', textAlign: 'center' }}>
                 {state.home_score}
               </div>
 
