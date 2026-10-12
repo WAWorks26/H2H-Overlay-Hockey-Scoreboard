@@ -307,6 +307,11 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     return state?.graphics_config?.[key] ?? fallback;
   };
 
+  // HELPER TO READ FRESH CONFIG VALUES DIRECTLY FROM STATEREF AT RUNTIME
+  const getRefGVar = (key: string, fallback: any = '') => {
+    return stateRef.current?.graphics_config?.[key] ?? fallback;
+  };
+
   const copyComponentSettings = () => {
     const config = state?.graphics_config || {};
     const settingsToCopy: Record<string, any> = {};
@@ -414,14 +419,16 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     updateGraphicVar('hotkeys', cleared, true);
   };
 
+  // DYNAMIC AUTO-HIDE TRIGGER (ALWAYS READS LIVE DYNAMIC GRAPHICS_CONFIG)
   const triggerRolloutWithAutoHide = (modeName: string, textValue: string) => {
     if (rolloutTimerRef.current) {
       clearTimeout(rolloutTimerRef.current);
       rolloutTimerRef.current = null;
     }
 
-    const autoHide = getGVar(`${modeName}_autohide`, true) === true;
-    const duration = parseInt(getGVar(`${modeName}_duration`, '5')) || 5;
+    const autoHideSetting = getRefGVar(`${modeName}_autohide`, true);
+    const autoHide = autoHideSetting === true || autoHideSetting === 'true';
+    const duration = parseInt(getRefGVar(`${modeName}_duration`, '5')) || 5;
 
     updateField('right_panel_mode', modeName);
     updateField('right_panel_text', textValue);
@@ -442,9 +449,9 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
       broadcastState(updated);
       supabase.from('scoreboards').update({ [field]: newVal }).eq('id', id);
 
-      if (type === 'score' && val > 0 && getGVar('auto_goal_rollout', true)) {
+      if (type === 'score' && val > 0 && getRefGVar('auto_goal_rollout', true)) {
         const teamName = team === 'away' ? (prev.away_name || 'AWAY') : (prev.home_name || 'HOME');
-        const goalText = getGVar('goal_text_format', 'GOAL {TEAM}').replace('{TEAM}', teamName);
+        const goalText = getRefGVar('goal_text_format', 'GOAL {TEAM}').replace('{TEAM}', teamName);
         const mode = team === 'away' ? 'awayGoal' : 'homeGoal';
         triggerRolloutWithAutoHide(mode, goalText);
       }
@@ -459,7 +466,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     const modeName = `rollout${num}`;
     const isActivating = currentState.right_panel_mode !== modeName;
     const newMode = isActivating ? modeName : 'none';
-    const txt = getGVar(`rollout${num}_text`, `ROLLOUT ${num}`);
+    const txt = getRefGVar(`rollout${num}_text`, `ROLLOUT ${num}`);
     
     if (newMode === 'none') {
       if (rolloutTimerRef.current) clearTimeout(rolloutTimerRef.current);
@@ -481,6 +488,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     }
   };
 
+  // FULL WIDTH BANNER DYNAMIC AUTO HIDE TRIGGER
   const triggerBanner = async () => {
     const currentState = stateRef.current;
     if (!currentState) return;
@@ -491,9 +499,10 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     }
 
     const isActive = !currentState.banner_active;
-    const txt = getGVar('banner_text', "FULL WIDTH BANNER");
-    const autoHide = getGVar('banner_autohide', true) === true;
-    const duration = parseInt(getGVar('banner_duration', '5')) || 5;
+    const txt = getRefGVar('banner_text', "FULL WIDTH BANNER");
+    const autoHideSetting = getRefGVar('banner_autohide', true);
+    const autoHide = autoHideSetting === true || autoHideSetting === 'true';
+    const duration = parseInt(getRefGVar('banner_duration', '5')) || 5;
 
     updateField('banner_active', isActive);
     updateField('banner_text', txt);
@@ -517,7 +526,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
         return;
       }
 
-      const matchedAction = Object.keys(hotkeysConfig).find(action => hotkeysConfig[action] === e.code);
+      const activeHotkeys = stateRef.current?.graphics_config?.hotkeys || DEFAULT_HOTKEYS;
+      const matchedAction = Object.keys(activeHotkeys).find(action => activeHotkeys[action] === e.code);
       if (!matchedAction) return;
 
       e.preventDefault();
@@ -553,7 +563,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [hotkeysConfig, listeningKeyFor]);
+  }, [listeningKeyFor]);
 
   const addPenalty = async () => {
     const team = (document.getElementById('sel-pen-team') as HTMLSelectElement).value;
@@ -882,14 +892,14 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     <div id="control-panel" style={{ backgroundColor: themeVars.bgPage, color: themeVars.textColor, minHeight: '100vh' }}>
       
       <style>{`
-        body, html { background-color: ${themeVars.bgPage} !important; color:${themeVars.textColor} !important; }
-        #control-panel .box { background-color: ${themeVars.bgBox} !important; border-color:${themeVars.borderCol} !important; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
+        body, html { background-color: ${themeVars.bgPage} !important; color: ${themeVars.textColor} !important; }
+        #control-panel .box { background-color: ${themeVars.bgBox} !important; border-color: ${themeVars.borderCol} !important; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
         #control-panel .box h3, #control-panel .box label { color: ${themeVars.headerTextCol} !important; }
-        #control-panel input, #control-panel select { background-color: ${themeVars.bgInput} !important; color: ${themeVars.textColor} !important; border-color:${themeVars.borderCol} !important; }
-        #control-panel .tab-headers { background-color: ${themeVars.tabHeaderBg} !important; border-bottom-color:${themeVars.borderCol} !important; }
+        #control-panel input, #control-panel select { background-color: ${themeVars.bgInput} !important; color: ${themeVars.textColor} !important; border-color: ${themeVars.borderCol} !important; }
+        #control-panel .tab-headers { background-color: ${themeVars.tabHeaderBg} !important; border-bottom-color: ${themeVars.borderCol} !important; }
         #control-panel .tab-btn { color: ${themeVars.tabInactiveText} !important; font-weight: bold; border: none; padding: 12px 20px; cursor: pointer; transition: background 0.15s ease; }
         #control-panel .tab-btn:hover:not(.active) { background-color: ${isLight ? '#c9cfd8' : '#3a404a'} !important; color: ${isLight ? '#1c2431' : '#ffffff'} !important; }
-        #control-panel .tab-btn.active { background-color: ${themeVars.tabActiveBg} !important; color:${themeVars.tabActiveText} !important; border-bottom: 3px solid #FF5100; }
+        #control-panel .tab-btn.active { background-color: ${themeVars.tabActiveBg} !important; color: ${themeVars.tabActiveText} !important; border-bottom: 3px solid #FF5100; }
         
         #control-panel .btn {
           border-radius: 8px !important;
@@ -910,7 +920,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
         #control-panel .btn-red { background: linear-gradient(180deg, #f85b5b 0%, #c92a2a 100%) !important; color: #ffffff !important; }
         #control-panel .btn-purple { background: linear-gradient(180deg, #a073f8 0%, #6d38d9 100%) !important; color: #ffffff !important; }
         #control-panel .btn-secondary-theme { 
-          background: linear-gradient(180deg, ${isLight ? '#FFFFFF' : '#636a75'} 0\%, ${isLight ? '#E1E5E9' : '#454a52'} 100%) !important; 
+          background: linear-gradient(180deg, ${isLight ? '#FFFFFF' : '#636a75'} 0%, ${isLight ? '#E1E5E9' : '#454a52'} 100%) !important; 
           color: ${themeVars.btnSecondaryText} !important; 
           border: 1px solid ${themeVars.btnSecondaryBorder} !important; 
         }
@@ -1617,7 +1627,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                         <input 
                           type="checkbox" 
                           id={`chk-autohide-${selectedComp}`}
-                          checked={getGVar(`${selectedComp}_autohide`, true)}
+                          checked={getGVar(`${selectedComp}_autohide`, true) === true || getGVar(`${selectedComp}_autohide`, true) === 'true'}
                           onChange={(e) => updateGraphicVar(`${selectedComp}_autohide`, e.target.checked, true)}
                         />
                         <label htmlFor={`chk-autohide-${selectedComp}`} style={{ fontSize: '12px', cursor: 'pointer', fontWeight: 'bold' }}>
@@ -2158,7 +2168,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                             style={{ 
                               width: '100%', height: '100%', objectFit: 'contain', position: 'absolute', top: 0, left: 0,
                               opacity: parseFloat(currentImgAlpha) / 100,
-                              transform: `translate(${currentImgX}\%,${currentImgY}%) scale(${parseFloat(currentImgScale) / 100}) skewX(${mediaComputedSkew}deg)`
+                              transform: `translate(${currentImgX}%, ${currentImgY}%) scale(${parseFloat(currentImgScale) / 100}) skewX(${mediaComputedSkew}deg)`
                             }} 
                           />
                         ) : (
@@ -2168,7 +2178,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                             style={{ 
                               width: '100%', height: '100%', objectFit: 'contain', position: 'absolute', top: 0, left: 0,
                               opacity: parseFloat(currentImgAlpha) / 100,
-                              transform: `translate(${currentImgX}\%,${currentImgY}%) scale(${parseFloat(currentImgScale) / 100}) skewX(${mediaComputedSkew}deg)`
+                              transform: `translate(${currentImgX}%, ${currentImgY}%) scale(${parseFloat(currentImgScale) / 100}) skewX(${mediaComputedSkew}deg)`
                             }} 
                           />
                         )}
