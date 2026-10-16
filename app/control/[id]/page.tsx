@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, use, useRef } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
 
 interface Penalty { id: number; team: string; plyr: string; time: number; }
@@ -15,9 +15,7 @@ const DEFAULT_HOTKEYS: Record<string, string> = {
 };
 
 export default function ControlPanelPage({ params }: { params: Promise<{ id: string }> }) {
-  const unwrappedParams = use(params);
-  const id = unwrappedParams.id;
-  
+  const [id, setId] = useState<string | null>(null);
   const [state, setState] = useState<any>(null);
   const [activeTab, setActiveTab] = useState('tab-ops');
   const [selectedComp, setSelectedComp] = useState('clock');
@@ -28,7 +26,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
   const [copiedLink, setCopiedLink] = useState(false);
   const [copiedSettings, setCopiedSettings] = useState<any>(null);
 
-  // Undo / Redo History Stack
   const [historyStack, setHistoryStack] = useState<any[]>([]);
   const [historyIndex, setHistoryIndex] = useState<number>(-1);
   const isHistoryAction = useRef(false);
@@ -38,14 +35,20 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
   const [periodLengthMin, setPeriodLengthMin] = useState(20);
 
   const stateRef = useRef(state);
-  stateRef.current = state;
   const channelRef = useRef<any>(null);
   const localChannelRef = useRef<BroadcastChannel | null>(null);
   const debounceTimer = useRef<NodeJS.Timeout | null>(null);
   const rolloutTimerRef = useRef<NodeJS.Timeout | null>(null);
   const bannerTimerRef = useRef<NodeJS.Timeout | null>(null);
+  
+  const handleKeyDownRef = useRef<(e: KeyboardEvent) => void>();
 
   useEffect(() => {
+    params.then(p => setId(p.id));
+  }, [params]);
+
+  useEffect(() => {
+    if (!id) return;
     const channel = supabase.channel(`scoreboard_${id}`, { config: { broadcast: { self: false } } });
     channel.subscribe();
     channelRef.current = channel;
@@ -76,11 +79,9 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
   };
 
   useEffect(() => {
+    if (!id) return;
     const fetchState = async () => {
-      // Sanitize non-hex characters (like 'g') to ensure valid Postgres UUID syntax
-      const validUuid = id.replace(/[^0-9a-fA-F-]/g, '1');
-
-      const { data, error } = await supabase.from('scoreboards').select('*').eq('id', validUuid).single();
+      const { data, error } = await supabase.from('scoreboards').select('*').eq('id', id).single();
       if (error) console.error("Supabase Error:", error.message);
       if (data) {
         const initialConfig = data.graphics_config || {};
@@ -90,6 +91,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
           shootout_rounds: data.shootout_rounds || Array(10).fill({ away: 0, home: 0 }),
           graphics_config: initialConfig
         };
+        stateRef.current = initialState;
         setState(initialState);
         setHistoryStack([JSON.parse(JSON.stringify(initialConfig))]);
         setHistoryIndex(0);
@@ -118,10 +120,14 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
       isHistoryAction.current = true;
       setHistoryIndex(newIdx);
 
-      const updated = { ...state, graphics_config: targetConfig };
+      const currentState = stateRef.current;
+      if (!currentState) return;
+      
+      const updated = { ...currentState, graphics_config: targetConfig };
+      stateRef.current = updated;
       setState(updated);
       broadcastState(updated);
-      supabase.from('scoreboards').update({ graphics_config: targetConfig }).eq('id', id);
+      supabase.from('scoreboards').update({ graphics_config: targetConfig, clock_seconds: currentState.clock_seconds }).eq('id', id).then();
     }
   };
 
@@ -132,16 +138,20 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
       isHistoryAction.current = true;
       setHistoryIndex(newIdx);
 
-      const updated = { ...state, graphics_config: targetConfig };
+      const currentState = stateRef.current;
+      if (!currentState) return;
+
+      const updated = { ...currentState, graphics_config: targetConfig };
+      stateRef.current = updated;
       setState(updated);
       broadcastState(updated);
-      supabase.from('scoreboards').update({ graphics_config: targetConfig }).eq('id', id);
+      supabase.from('scoreboards').update({ graphics_config: targetConfig, clock_seconds: currentState.clock_seconds }).eq('id', id).then();
     }
   };
 
   useEffect(() => {
     let autoSaveTimer: NodeJS.Timeout;
-    if (autoSaveEnabled && state) {
+    if (autoSaveEnabled) {
       autoSaveTimer = setInterval(async () => {
         if (stateRef.current) {
           await supabase.from('scoreboards').update({
@@ -165,149 +175,174 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
 
   useEffect(() => {
     let interval: NodeJS.Timeout;
-    if (state?.clock_running && state.clock_seconds > 0) {
+    const currentState = stateRef.current;
+    if (currentState?.clock_running && currentState.clock_seconds > 0) {
       interval = setInterval(() => {
-        setState((prev: any) => {
-          if (!prev) return prev;
-          
-          const newPenalties = (prev.penalties || [])
-            .map((p: Penalty) => p.time > 0 ? { ...p, time: p.time - 1 } : p)
-            .filter((p: Penalty) => p.time > 0);
+        const liveState = stateRef.current;
+        if (!liveState) return;
+        
+        const newPenalties = (liveState.penalties || [])
+          .map((p: Penalty) => p.time > 0 ? { ...p, time: p.time - 1 } : p)
+          .filter((p: Penalty) => p.time > 0);
 
-          const nextState = {
-            ...prev,
-            clock_seconds: prev.clock_seconds <= 0 ? 0 : prev.clock_seconds - 1,
-            clock_running: prev.clock_seconds <= 0 ? false : prev.clock_running,
-            penalties: newPenalties
-          };
+        const nextState = {
+          ...liveState,
+          clock_seconds: liveState.clock_seconds <= 0 ? 0 : liveState.clock_seconds - 1,
+          clock_running: liveState.clock_seconds <= 0 ? false : liveState.clock_running,
+          penalties: newPenalties
+        };
 
-          if (prev.clock_seconds <= 0) {
-            clearInterval(interval);
-            supabase.from('scoreboards').update({ clock_running: false, penalties: newPenalties }).eq('id', id);
-          }
+        stateRef.current = nextState;
+        setState(nextState);
+        broadcastState(nextState);
 
-          broadcastState(nextState);
-          return nextState;
-        });
+        if (liveState.clock_seconds <= 0) {
+          clearInterval(interval);
+          supabase.from('scoreboards').update({ clock_running: false, penalties: newPenalties }).eq('id', id).then();
+        }
       }, 1000);
     }
     return () => clearInterval(interval);
   }, [state?.clock_running, id]);
 
   const updateField = async (field: string, value: any) => {
-    setState((prev: any) => {
-      if (!prev) return prev;
-      const updated = { ...prev, [field]: value };
-      broadcastState(updated);
-      supabase.from('scoreboards').update({ [field]: value }).eq('id', id);
-      return updated;
-    });
+    const currentState = stateRef.current;
+    if (!currentState) return;
+    
+    const updated = { ...currentState, [field]: value };
+    stateRef.current = updated;
+    setState(updated);
+    broadcastState(updated);
+    supabase.from('scoreboards').update({ [field]: value, clock_seconds: currentState.clock_seconds }).eq('id', id).then();
+  };
+
+  const resetStats = (type: 'away' | 'home' | 'all') => {
+    const currentState = stateRef.current;
+    if (!currentState) return;
+
+    if (rolloutTimerRef.current) {
+      clearTimeout(rolloutTimerRef.current);
+      rolloutTimerRef.current = null;
+    }
+
+    const payload: Record<string, any> = { right_panel_mode: 'none', right_panel_text: '' };
+    if (type === 'away' || type === 'all') {
+      payload.away_score = 0;
+      payload.away_sog = 0;
+    }
+    if (type === 'home' || type === 'all') {
+      payload.home_score = 0;
+      payload.home_sog = 0;
+    }
+
+    const updated = { ...currentState, ...payload };
+    stateRef.current = updated;
+    setState(updated);
+    broadcastState(updated);
+    supabase.from('scoreboards').update({ ...payload, clock_seconds: currentState.clock_seconds }).eq('id', id).then();
   };
 
   const adjClock = async (seconds: number) => {
-    setState((prev: any) => {
-      if (!prev) return prev;
-      const newSeconds = Math.max(0, prev.clock_seconds + seconds);
-      const updated = { ...prev, clock_seconds: newSeconds };
-      broadcastState(updated);
-      supabase.from('scoreboards').update({ clock_seconds: newSeconds }).eq('id', id);
-      return updated;
-    });
+    const currentState = stateRef.current;
+    if (!currentState) return;
+    const newSeconds = Math.max(0, currentState.clock_seconds + seconds);
+    const updated = { ...currentState, clock_seconds: newSeconds };
+    
+    stateRef.current = updated;
+    setState(updated);
+    broadcastState(updated);
+    supabase.from('scoreboards').update({ clock_seconds: newSeconds }).eq('id', id).then();
   };
 
   const toggleClock = async () => {
-    setState((prev: any) => {
-      if (!prev) return prev;
-      
-      const newRunningState = !prev.clock_running;
-      const currentSeconds = prev.clock_seconds;
+    const currentState = stateRef.current;
+    if (!currentState) return;
+    const newRunningState = !currentState.clock_running;
 
-      const updated = {
-        ...prev,
-        clock_running: newRunningState,
-        clock_seconds: currentSeconds
-      };
-
-      broadcastState(updated);
-      supabase.from('scoreboards').update({ clock_running: newRunningState }).eq('id', id);
-
-      return updated;
-    });
+    const updated = { ...currentState, clock_running: newRunningState };
+    stateRef.current = updated;
+    setState(updated);
+    broadcastState(updated);
+    supabase.from('scoreboards').update({ clock_running: newRunningState, clock_seconds: currentState.clock_seconds }).eq('id', id).then();
   };
 
   const resetClock = () => {
+    const currentState = stateRef.current;
+    if (!currentState) return;
     const totalSecs = periodLengthMin * 60;
-    setState((prev: any) => {
-      if (!prev) return prev;
-      const updated = { ...prev, clock_running: false, clock_seconds: totalSecs };
-      broadcastState(updated);
-      supabase.from('scoreboards').update({ clock_running: false, clock_seconds: totalSecs }).eq('id', id);
-      return updated;
-    });
+    
+    const updated = { ...currentState, clock_running: false, clock_seconds: totalSecs };
+    stateRef.current = updated;
+    setState(updated);
+    broadcastState(updated);
+    supabase.from('scoreboards').update({ clock_running: false, clock_seconds: totalSecs }).eq('id', id).then();
   };
 
   const handlePeriodChange = async (newPeriod: string) => {
+    const currentState = stateRef.current;
+    if (!currentState) return;
     const totalSecs = periodLengthMin * 60;
-    setState((prev: any) => {
-      if (!prev) return prev;
-      const updated = { 
-        ...prev, 
-        period: newPeriod,
-        clock_running: false, 
-        clock_seconds: totalSecs 
-      };
-      broadcastState(updated);
-      supabase.from('scoreboards').update({ 
-        period: newPeriod,
-        clock_running: false, 
-        clock_seconds: totalSecs 
-      }).eq('id', id);
-      return updated;
-    });
+    
+    const updated = { 
+      ...currentState, 
+      period: newPeriod,
+      clock_running: false, 
+      clock_seconds: totalSecs 
+    };
+    stateRef.current = updated;
+    setState(updated);
+    broadcastState(updated);
+    supabase.from('scoreboards').update({ 
+      period: newPeriod,
+      clock_running: false, 
+      clock_seconds: totalSecs 
+    }).eq('id', id).then();
   };
 
   const setExactPenaltyTime = async (penId: number, mins: number, secs: number) => {
+    const currentState = stateRef.current;
+    if (!currentState) return;
+    
     const newTotalSeconds = Math.max(0, (mins * 60) + secs);
-    setState((prev: any) => {
-      if (!prev) return prev;
-      const updatedPenalties = (prev.penalties || [])
-        .map((p: Penalty) => p.id === penId ? { ...p, time: newTotalSeconds } : p)
-        .filter((p: Penalty) => p.time > 0);
+    const updatedPenalties = (currentState.penalties || [])
+      .map((p: Penalty) => p.id === penId ? { ...p, time: newTotalSeconds } : p)
+      .filter((p: Penalty) => p.time > 0);
 
-      const updated = { ...prev, penalties: updatedPenalties };
-      broadcastState(updated);
-      supabase.from('scoreboards').update({ penalties: updatedPenalties }).eq('id', id);
-      return updated;
-    });
+    const updated = { ...currentState, penalties: updatedPenalties };
+    stateRef.current = updated;
+    setState(updated);
+    broadcastState(updated);
+    supabase.from('scoreboards').update({ penalties: updatedPenalties, clock_seconds: currentState.clock_seconds }).eq('id', id).then();
   };
 
   const updateGraphicVar = async (key: string, value: any, immediate = false, skipHistory = false) => {
-    setState((prev: any) => {
-      if (!prev) return prev;
-      const newConfig = { ...(prev.graphics_config || {}), [key]: value };
-      const updated = { ...prev, graphics_config: newConfig };
+    const currentState = stateRef.current;
+    if (!currentState) return;
 
-      broadcastState(updated);
-      if (!skipHistory) {
-        pushHistory(newConfig);
-      }
+    const newConfig = { ...(currentState.graphics_config || {}), [key]: value };
+    const updated = { ...currentState, graphics_config: newConfig };
 
-      if (debounceTimer.current) clearTimeout(debounceTimer.current);
+    stateRef.current = updated;
+    setState(updated);
+    broadcastState(updated);
 
-      if (immediate) {
-        supabase.from('scoreboards').update({ graphics_config: newConfig }).eq('id', id);
-      } else {
-        debounceTimer.current = setTimeout(async () => {
-          supabase.from('scoreboards').update({ graphics_config: newConfig }).eq('id', id);
-        }, 150);
-      }
+    if (!skipHistory) {
+      pushHistory(newConfig);
+    }
 
-      return updated;
-    });
+    if (debounceTimer.current) clearTimeout(debounceTimer.current);
+
+    if (immediate) {
+      supabase.from('scoreboards').update({ graphics_config: newConfig, clock_seconds: currentState.clock_seconds }).eq('id', id).then();
+    } else {
+      debounceTimer.current = setTimeout(() => {
+        supabase.from('scoreboards').update({ graphics_config: newConfig, clock_seconds: currentState.clock_seconds }).eq('id', id).then();
+      }, 200);
+    }
   };
 
   const getGVar = (key: string, fallback: any = '') => {
-    return state?.graphics_config?.[key] ?? fallback;
+    return stateRef.current?.graphics_config?.[key] ?? fallback;
   };
 
   const getRefGVar = (key: string, fallback: any = '') => {
@@ -315,7 +350,10 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
   };
 
   const copyComponentSettings = () => {
-    const config = state?.graphics_config || {};
+    const currentState = stateRef.current;
+    if (!currentState) return;
+
+    const config = currentState.graphics_config || {};
     const settingsToCopy: Record<string, any> = {};
     const prefix = `${selectedComp}_`;
 
@@ -326,22 +364,23 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
       }
     });
 
-    if (selectedComp === 'awayTeam') settingsToCopy['bg_color'] = state?.away_color || config['awayTeam_bg_color'] || '#00468b';
-    if (selectedComp === 'homeTeam') settingsToCopy['bg_color'] = state?.home_color || config['homeTeam_bg_color'] || '#222222';
+    if (selectedComp === 'awayTeam') settingsToCopy['bg_color'] = currentState.away_color || config['awayTeam_bg_color'] || '#00468b';
+    if (selectedComp === 'homeTeam') settingsToCopy['bg_color'] = currentState.home_color || config['homeTeam_bg_color'] || '#222222';
 
     setCopiedSettings(settingsToCopy);
     alert(`Copied graphics settings from [${selectedComp}]!`);
   };
 
   const pasteComponentSettings = () => {
-    if (!copiedSettings) {
+    const currentState = stateRef.current;
+    if (!currentState || !copiedSettings) {
       alert('No settings copied yet. Copy settings from an element first!');
       return;
     }
 
-    const newConfig = { ...(state?.graphics_config || {}) };
-    let newAwayColor = state?.away_color;
-    let newHomeColor = state?.home_color;
+    const newConfig = { ...(currentState.graphics_config || {}) };
+    let newAwayColor = currentState.away_color;
+    let newHomeColor = currentState.home_color;
 
     Object.keys(copiedSettings).forEach((field) => {
       const fullKey = `${selectedComp}_${field}`;
@@ -355,12 +394,13 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     });
 
     const updated = { 
-      ...state, 
+      ...currentState, 
       away_color: newAwayColor,
       home_color: newHomeColor,
       graphics_config: newConfig 
     };
 
+    stateRef.current = updated;
     setState(updated);
     broadcastState(updated);
     pushHistory(newConfig);
@@ -368,8 +408,9 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     supabase.from('scoreboards').update({ 
       away_color: newAwayColor,
       home_color: newHomeColor,
-      graphics_config: newConfig 
-    }).eq('id', id);
+      graphics_config: newConfig,
+      clock_seconds: currentState.clock_seconds 
+    }).eq('id', id).then();
 
     alert(`Pasted settings onto [${selectedComp}]!`);
   };
@@ -421,61 +462,78 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     updateGraphicVar('hotkeys', cleared, true);
   };
 
+  const adjStat = async (team: 'away' | 'home', type: 'score' | 'sog', val: number) => {
+    const currentState = stateRef.current;
+    if (!currentState) return;
+
+    const field = `${team}_${type}`;
+    const newVal = Math.max(0, (currentState[field] || 0) + val);
+    
+    const updatePayload: Record<string, any> = { 
+      [field]: newVal,
+      clock_seconds: currentState.clock_seconds 
+    };
+
+    const isAutoRolloutEnabled = getRefGVar('auto_goal_rollout', true);
+
+    if (type === 'score' && val > 0 && isAutoRolloutEnabled) {
+      const isAway = team === 'away';
+      const teamName = isAway ? (currentState.away_name || 'AWAY') : (currentState.home_name || 'HOME');
+      const goalText = getRefGVar('goal_text_format', 'GOAL {TEAM}').replace(/{TEAM}/g, teamName);
+      const mode = isAway ? 'awayGoal' : 'homeGoal';
+
+      if (rolloutTimerRef.current) {
+        clearTimeout(rolloutTimerRef.current);
+        rolloutTimerRef.current = null;
+      }
+
+      const durationVal = parseInt(getRefGVar(`${mode}_duration`, '5'));
+      const duration = isNaN(durationVal) ? 5 : durationVal;
+
+      const isAutoHide = getRefGVar(`${mode}_autohide`, true);
+      const shouldAutoHide = isAutoHide === true || isAutoHide === 'true';
+
+      updatePayload['right_panel_mode'] = mode;
+      updatePayload['right_panel_text'] = goalText;
+
+      if (shouldAutoHide) {
+        rolloutTimerRef.current = setTimeout(() => {
+          updateField('right_panel_mode', 'none');
+        }, duration * 1000);
+      }
+    } else if (type === 'score') {
+      updatePayload['right_panel_mode'] = 'none';
+      updatePayload['right_panel_text'] = '';
+    }
+
+    const updated = { ...currentState, ...updatePayload };
+    stateRef.current = updated;
+    setState(updated);
+    broadcastState(updated);
+
+    await supabase.from('scoreboards').update(updatePayload).eq('id', id);
+  };
+
   const triggerRolloutWithAutoHide = (modeName: string, textValue: string) => {
     if (rolloutTimerRef.current) {
       clearTimeout(rolloutTimerRef.current);
       rolloutTimerRef.current = null;
     }
 
-    const autoHideSetting = getRefGVar(`${modeName}_autohide`, true);
-    const autoHide = autoHideSetting === true || autoHideSetting === 'true';
-    const duration = parseInt(getRefGVar(`${modeName}_duration`, '5')) || 5;
+    const durationVal = parseInt(getRefGVar(`${modeName}_duration`, '5'));
+    const duration = isNaN(durationVal) ? 5 : durationVal;
+
+    const isAutoHide = getRefGVar(`${modeName}_autohide`, true);
+    const shouldAutoHide = isAutoHide === true || isAutoHide === 'true';
 
     updateField('right_panel_mode', modeName);
     updateField('right_panel_text', textValue);
 
-    if (autoHide && modeName !== 'none') {
+    if (modeName !== 'none' && shouldAutoHide) {
       rolloutTimerRef.current = setTimeout(() => {
         updateField('right_panel_mode', 'none');
       }, duration * 1000);
     }
-  };
-
-  const adjStat = (team: 'away' | 'home', type: 'score' | 'sog', val: number) => {
-    setState((prev: any) => {
-      if (!prev) return prev;
-      const field = `${team}_${type}`;
-      const newVal = Math.max(0, (prev[field] || 0) + val);
-      const updated = { ...prev, [field]: newVal };
-      broadcastState(updated);
-      supabase.from('scoreboards').update({ [field]: newVal }).eq('id', id);
-
-      if (type === 'score' && val > 0 && getRefGVar('auto_goal_rollout', true)) {
-        const teamName = team === 'away' ? (prev.away_name || 'AWAY') : (prev.home_name || 'HOME');
-        const goalText = getRefGVar('goal_text_format', 'GOAL {TEAM}').replace('{TEAM}', teamName);
-        const mode = team === 'away' ? 'awayGoal' : 'homeGoal';
-
-        if (rolloutTimerRef.current) {
-          clearTimeout(rolloutTimerRef.current);
-          rolloutTimerRef.current = null;
-        }
-
-        const autoHideSetting = getRefGVar(`${mode}_autohide`, getRefGVar('rollout1_autohide', true));
-        const autoHide = autoHideSetting === true || autoHideSetting === 'true';
-        const duration = parseInt(getRefGVar(`${mode}_duration`, getRefGVar('rollout1_duration', '3'))) || 3;
-
-        updateField('right_panel_mode', mode);
-        updateField('right_panel_text', goalText);
-
-        if (autoHide) {
-          rolloutTimerRef.current = setTimeout(() => {
-            updateField('right_panel_mode', 'none');
-          }, duration * 1000);
-        }
-      }
-
-      return updated;
-    });
   };
 
   const triggerRollout = async (num: number) => {
@@ -517,14 +575,17 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
 
     const isActive = !currentState.banner_active;
     const txt = getRefGVar('banner_text', "FULL WIDTH BANNER");
-    const autoHideSetting = getRefGVar('banner_autohide', true);
-    const autoHide = autoHideSetting === true || autoHideSetting === 'true';
-    const duration = parseInt(getRefGVar('banner_duration', '5')) || 5;
+    
+    const durationVal = parseInt(getRefGVar('banner_duration', '5'));
+    const duration = isNaN(durationVal) ? 5 : durationVal;
+    
+    const isAutoHide = getRefGVar('banner_autohide', true);
+    const shouldAutoHide = isAutoHide === true || isAutoHide === 'true';
 
     updateField('banner_active', isActive);
     updateField('banner_text', txt);
 
-    if (isActive && autoHide) {
+    if (isActive && shouldAutoHide) {
       bannerTimerRef.current = setTimeout(() => {
         updateField('banner_active', false);
       }, duration * 1000);
@@ -532,7 +593,9 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
   };
 
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
+    handleKeyDownRef.current = (e: KeyboardEvent) => {
+      if (e.repeat) return; 
+
       const target = e.target as HTMLElement;
       if (['INPUT', 'SELECT', 'TEXTAREA'].includes(target.tagName) && !listeningKeyFor) return;
 
@@ -560,7 +623,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
         case 'subMin': adjClock(-60); break;
         case 'addSec': adjClock(1); break;
         case 'subSec': adjClock(-1); break;
-        case 'resetAllStats': updateField('away_score', 0); updateField('away_sog', 0); updateField('home_score', 0); updateField('home_sog', 0); break;
+        case 'resetAllStats': resetStats('all'); break;
         case 'clearPenalties': updateField('penalties', []); break;
         case 'triggerRollout1': triggerRollout(1); break;
         case 'triggerRollout2': triggerRollout(2); break;
@@ -577,10 +640,15 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
         case 'subHomeSog': adjStat('home', 'sog', -1); break;
       }
     };
+  });
 
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [listeningKeyFor]);
+  useEffect(() => {
+    const listener = (e: KeyboardEvent) => {
+      if (handleKeyDownRef.current) handleKeyDownRef.current(e);
+    };
+    window.addEventListener('keydown', listener);
+    return () => window.removeEventListener('keydown', listener);
+  }, []);
 
   const addPenalty = async () => {
     const team = (document.getElementById('sel-pen-team') as HTMLSelectElement).value;
@@ -590,19 +658,26 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     const time = (min * 60) + sec;
     
     if (time > 0) {
-      const newPenalties = [...(state.penalties || []), { id: Date.now(), team, plyr, time }];
+      const currentState = stateRef.current;
+      if (!currentState) return;
+
+      const newPenalties = [...(currentState.penalties || []), { id: Date.now(), team, plyr, time }];
       updateField('penalties', newPenalties);
       (document.getElementById('inp-pen-plyr') as HTMLInputElement).value = '';
     }
   };
 
   const removePenalty = async (penId: number) => {
-    const newPenalties = state.penalties.filter((p: Penalty) => p.id !== penId);
+    const currentState = stateRef.current;
+    if (!currentState) return;
+    const newPenalties = currentState.penalties.filter((p: Penalty) => p.id !== penId);
     updateField('penalties', newPenalties);
   };
 
   const updateShootoutRound = async (index: number, team: 'away' | 'home', val: number) => {
-    const newRounds = [...(state.shootout_rounds || Array(10).fill({ away: 0, home: 0 }))];
+    const currentState = stateRef.current;
+    if (!currentState) return;
+    const newRounds = [...(currentState.shootout_rounds || Array(10).fill({ away: 0, home: 0 }))];
     newRounds[index] = { ...newRounds[index], [team]: val };
     updateField('shootout_rounds', newRounds);
   };
@@ -649,19 +724,23 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
         .getPublicUrl(filePath);
 
       if (urlData?.publicUrl) {
+        const currentState = stateRef.current;
+        if (!currentState) return;
+
         const newConfig = { 
-          ...(state.graphics_config || {}),
+          ...(currentState.graphics_config || {}),
           [`${selectedComp}_media_url`]: urlData.publicUrl,
           [`${selectedComp}_is_video`]: isVid,
           [`${selectedComp}_media_loop`]: true,
           [`${selectedComp}_media_ts`]: nowTs
         };
 
-        const updated = { ...state, graphics_config: newConfig };
+        const updated = { ...currentState, graphics_config: newConfig };
+        stateRef.current = updated;
         setState(updated);
         await broadcastState(updated);
         pushHistory(newConfig);
-        await supabase.from('scoreboards').update({ graphics_config: newConfig }).eq('id', id);
+        await supabase.from('scoreboards').update({ graphics_config: newConfig, clock_seconds: currentState.clock_seconds }).eq('id', id);
       }
 
     } catch (err) {
@@ -673,17 +752,21 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     const fileInput = document.getElementById(`file-input-${selectedComp}`) as HTMLInputElement;
     if (fileInput) fileInput.value = '';
 
-    const newConfig = { ...(state.graphics_config || {}) };
+    const currentState = stateRef.current;
+    if (!currentState) return;
+
+    const newConfig = { ...(currentState.graphics_config || {}) };
     delete newConfig[`${selectedComp}_media_url`];
     delete newConfig[`${selectedComp}_is_video`];
     delete newConfig[`${selectedComp}_media_loop`];
     delete newConfig[`${selectedComp}_media_ts`];
 
-    const updated = { ...state, graphics_config: newConfig };
+    const updated = { ...currentState, graphics_config: newConfig };
+    stateRef.current = updated;
     setState(updated);
     await broadcastState(updated);
     pushHistory(newConfig);
-    await supabase.from('scoreboards').update({ graphics_config: newConfig }).eq('id', id);
+    await supabase.from('scoreboards').update({ graphics_config: newConfig, clock_seconds: currentState.clock_seconds }).eq('id', id);
   };
 
   const selectExportFolder = async () => {
@@ -708,12 +791,12 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
   const exportProfileJSON = async () => {
     const customName = profileEventName.trim() 
       ? profileEventName.trim().replace(/[^a-zA-Z0-9_-]/g, '_')
-      : `${state.away_name}_vs_${state.home_name}`;
+      : `${stateRef.current?.away_name || 'AWAY'}_vs_${stateRef.current?.home_name || 'HOME'}`;
 
     const exportData = {
       profile_title: profileEventName.trim() || customName,
-      scoreboard: state,
-      graphics_config: state.graphics_config || {},
+      scoreboard: stateRef.current,
+      graphics_config: stateRef.current?.graphics_config || {},
       exported_at: new Date().toISOString()
     };
     
@@ -751,8 +834,10 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
       try {
         const parsed = JSON.parse(evt.target?.result as string);
         const importedConfig = parsed.graphics_config || parsed.cssVars || {};
+        const currentState = stateRef.current;
+
         const newScoreboardState = {
-          ...state,
+          ...currentState,
           ...(parsed.scoreboard || {}),
           id: id,
           graphics_config: importedConfig
@@ -762,6 +847,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
           setProfileEventName(parsed.profile_title);
         }
 
+        stateRef.current = newScoreboardState;
         setState(newScoreboardState);
         await broadcastState(newScoreboardState);
         pushHistory(importedConfig);
@@ -775,12 +861,12 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
   };
 
   const saveToTemporaryCache = () => {
-    localStorage.setItem(`scoreboard_cache_${id}`, JSON.stringify(state));
+    localStorage.setItem(`scoreboard_cache_${id}`, JSON.stringify(stateRef.current));
     alert("Profile saved to local browser temporary cache.");
   };
 
   const saveAsUserSystemDefault = () => {
-    localStorage.setItem(`scoreboard_default_user`, JSON.stringify(state));
+    localStorage.setItem(`scoreboard_default_user`, JSON.stringify(stateRef.current));
     alert("Profile set as your system default for new scoreboards.");
   };
 
@@ -792,6 +878,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     }
     const parsed = JSON.parse(saved);
     const restoredState = { ...parsed, id: id };
+    
+    stateRef.current = restoredState;
     setState(restoredState);
     await broadcastState(restoredState);
     pushHistory(restoredState.graphics_config || {});
@@ -801,6 +889,9 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
 
   const factoryReset = async () => {
     if (!confirm("Are you sure you want to reset all scoreboard settings to factory defaults?")) return;
+    const currentState = stateRef.current;
+    if (!currentState) return;
+
     const cleanConfig = {};
     const defaultData = {
       away_name: 'AWAY',
@@ -818,7 +909,9 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
       banner_active: false,
       right_panel_mode: 'none'
     };
-    const updated = { ...state, ...defaultData };
+    const updated = { ...currentState, ...defaultData };
+    
+    stateRef.current = updated;
     setState(updated);
     await broadcastState(updated);
     pushHistory(cleanConfig);
@@ -1076,12 +1169,12 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             overflow: 'hidden'
           }}>
             
-            {/* AWAY TEAM BLOCK WITH LEFT PENALTIES */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
+            {/* FIX: Absolute Penalties positioned OUTSIDE the flex container on the far left */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '20px', position: 'relative' }}>
               {(state.penalties || []).filter((p: Penalty) => p.team === 'away').length > 0 && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', width: '140px', flex: 'none' }}>
+                <div style={{ position: 'absolute', right: '100%', marginRight: '20px', top: '50%', transform: 'translateY(-50%)', display: 'flex', flexDirection: 'column', gap: '4px', width: '100px' }}>
                   {(state.penalties || []).filter((p: Penalty) => p.team === 'away').map((p: Penalty) => (
-                    <div key={p.id} style={{ background: state.away_color || '#00468b', color: '#ffffff', padding: '5px 12px', borderRadius: '4px', fontSize: '11px', fontWeight: '900', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div key={p.id} style={{ background: state.away_color || '#00468b', color: '#ffffff', padding: '4px 8px', borderRadius: '4px', fontSize: '10px', fontWeight: '900', display: 'flex', justifyContent: 'space-between', alignItems: 'center', whiteSpace: 'nowrap' }}>
                       <span>#{p.plyr}</span><span>{formatTime(p.time)}</span>
                     </div>
                   ))}
@@ -1134,9 +1227,9 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
               </span>
             </div>
 
-            {/* HOME TEAM BLOCK WITH RIGHT PENALTIES */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
-              <div style={{ fontSize: '32px', fontWeight: '900', color themeVars.textColor, minWidth: '24px', textAlign: 'center' }}>
+            {/* FIX: Absolute Penalties positioned OUTSIDE the flex container on the far right */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '20px', position: 'relative' }}>
+              <div style={{ fontSize: '32px', fontWeight: '900', color: themeVars.textColor, minWidth: '24px', textAlign: 'center' }}>
                 {state.home_score}
               </div>
 
@@ -1162,9 +1255,9 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
               </div>
 
               {(state.penalties || []).filter((p: Penalty) => p.team === 'home').length > 0 && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', width: '140px', flex: 'none' }}>
+                <div style={{ position: 'absolute', left: '100%', marginLeft: '20px', top: '50%', transform: 'translateY(-50%)', display: 'flex', flexDirection: 'column', gap: '4px', width: '100px' }}>
                   {(state.penalties || []).filter((p: Penalty) => p.team === 'home').map((p: Penalty) => (
-                    <div key={p.id} style={{ background: state.home_color || '#222222', color: '#ffffff', padding: '5px 12px', borderRadius: '4px', fontSize: '11px', fontWeight: '900', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div key={p.id} style={{ background: state.home_color || '#222222', color: '#ffffff', padding: '4px 8px', borderRadius: '4px', fontSize: '10px', fontWeight: '900', display: 'flex', justifyContent: 'space-between', alignItems: 'center', whiteSpace: 'nowrap' }}>
                       <span>#{p.plyr}</span><span>{formatTime(p.time)}</span>
                     </div>
                   ))}
@@ -1270,9 +1363,9 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
               <button className="btn btn-secondary-theme" onClick={() => adjStat('home', 'sog', -1)}>-1 SOG</button>
             </div>
             <div className="row" style={{ position: 'relative', zIndex: 1 }}>
-              <button className="btn btn-secondary-theme" onClick={() => { updateField('away_score', 0); updateField('away_sog', 0); }}>RESET AWAY STATS</button>
-              <button className="btn btn-secondary-theme" onClick={() => { updateField('home_score', 0); updateField('home_sog', 0); }}>RESET HOME STATS</button>
-              <button className="btn btn-secondary-theme" onClick={() => { updateField('away_score', 0); updateField('away_sog', 0); updateField('home_score', 0); updateField('home_sog', 0); }}>RESET ALL STATS</button>
+              <button className="btn btn-secondary-theme" onClick={() => resetStats('away')}>RESET AWAY STATS</button>
+              <button className="btn btn-secondary-theme" onClick={() => resetStats('home')}>RESET HOME STATS</button>
+              <button className="btn btn-secondary-theme" onClick={() => resetStats('all')}>RESET ALL STATS</button>
             </div>
           </div>
 
@@ -1433,8 +1526,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                 type="range" min="0.5" max="1.5" step="0.05" 
                 value={getGVar('bugScale', '1.0')} 
                 onChange={(e) => updateGraphicVar('bugScale', e.target.value, false, true)} 
-                onMouseUp={() => pushHistory(state?.graphics_config)}
-                onTouchEnd={() => pushHistory(state?.graphics_config)}
+                onMouseUp={() => pushHistory(stateRef.current?.graphics_config)}
+                onTouchEnd={() => pushHistory(stateRef.current?.graphics_config)}
               />
             </div>
 
@@ -1445,8 +1538,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                   type="range" min="-30" max="30" 
                   value={globalSkewVal} 
                   onChange={(e) => updateGraphicVar('skewAngle', e.target.value, true, true)} 
-                  onMouseUp={() => pushHistory(state?.graphics_config)}
-                  onTouchEnd={() => pushHistory(state?.graphics_config)}
+                  onMouseUp={() => pushHistory(stateRef.current?.graphics_config)}
+                  onTouchEnd={() => pushHistory(stateRef.current?.graphics_config)}
                 />
                 <input 
                   type="number" className="sync-num" 
@@ -1464,8 +1557,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                   type="range" min="0" max="40" 
                   value={getGVar('cornerRadius', '8')} 
                   onChange={(e) => updateGraphicVar('cornerRadius', e.target.value, false, true)} 
-                  onMouseUp={() => pushHistory(state?.graphics_config)}
-                  onTouchEnd={() => pushHistory(state?.graphics_config)}
+                  onMouseUp={() => pushHistory(stateRef.current?.graphics_config)}
+                  onTouchEnd={() => pushHistory(stateRef.current?.graphics_config)}
                 />
                 <input 
                   type="number" className="sync-num" 
@@ -1549,7 +1642,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             </div>
           </div>
 
-          {/* COMPONENT EDITOR WITH INDIVIDUAL ROLLOUT & BANNER AUTO-HIDE CONTROLS */}
           <div className="box" style={{ flex: '2 1 600px', borderColor: '#007bff' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #007bff', paddingBottom: '10px', marginBottom: '15px', flexWrap: 'wrap', gap: '10px' }}>
               <h3 style={{ border: 'none', margin: 0, padding: 0 }}>COMPONENT EDITOR</h3>
@@ -1633,10 +1725,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             </div>
 
             <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap' }}>
-              
               <div style={{ flex: '1 1 250px' }}>
-                
-                {/* INDIVIDUAL AUTO HIDE CONTROLS FOR ROLLOUT & BANNER ELEMENTS */}
                 {isRolloutElement && (
                   <div style={{ background: themeVars.bgInput, padding: '10px', borderRadius: '6px', marginBottom: '12px', border: `1px solid ${themeVars.borderCol}` }}>
                     <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
@@ -1666,7 +1755,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                   </div>
                 )}
 
-                {/* TEXT COLOR ROW */}
                 <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                   <label>Text Color:</label>
                   <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -1685,7 +1773,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                   </div>
                 </div>
 
-                {/* TEXT OUTLINE ROW */}
                 <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                   <label>Text Outline Color:</label>
                   <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -1711,8 +1798,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                       type="range" min="0" max="20" 
                       value={getGVar(`${selectedComp}_stroke_width`, '0')} 
                       onChange={(e) => updateGraphicVar(`${selectedComp}_stroke_width`, e.target.value, false, true)} 
-                      onMouseUp={() => pushHistory(state?.graphics_config)}
-                      onTouchEnd={() => pushHistory(state?.graphics_config)}
+                      onMouseUp={() => pushHistory(stateRef.current?.graphics_config)}
+                      onTouchEnd={() => pushHistory(stateRef.current?.graphics_config)}
                     />
                     <input 
                       type="number" className="sync-num" 
@@ -1749,8 +1836,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                       type="range" min="8" max="150" 
                       value={getGVar(`${selectedComp}_font_size`, '24')} 
                       onChange={(e) => updateGraphicVar(`${selectedComp}_font_size`, e.target.value, false, true)} 
-                      onMouseUp={() => pushHistory(state?.graphics_config)}
-                      onTouchEnd={() => pushHistory(state?.graphics_config)}
+                      onMouseUp={() => pushHistory(stateRef.current?.graphics_config)}
+                      onTouchEnd={() => pushHistory(stateRef.current?.graphics_config)}
                     />
                     <input 
                       type="number" className="sync-num" 
@@ -1802,8 +1889,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                         type="range" min="0.2" max="3.0" step="0.1" 
                         value={getGVar(`${selectedComp}_text_anim_dur`, '0.6')} 
                         onChange={(e) => updateGraphicVar(`${selectedComp}_text_anim_dur`, e.target.value, false, true)} 
-                        onMouseUp={() => pushHistory(state?.graphics_config)}
-                        onTouchEnd={() => pushHistory(state?.graphics_config)}
+                        onMouseUp={() => pushHistory(stateRef.current?.graphics_config)}
+                        onTouchEnd={() => pushHistory(stateRef.current?.graphics_config)}
                       />
                       <input 
                         type="number" className="sync-num" step="0.1"
@@ -1815,7 +1902,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                   </div>
                 )}
 
-                {/* TEXT SKEW */}
                 <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                   <label>Text Skew °:</label>
                   <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -1824,8 +1910,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                       value={getGVar(`${selectedComp}_text_global_skew`, false) ? globalSkewVal : getGVar(`${selectedComp}_text_skew`, '0')} 
                       disabled={getGVar(`${selectedComp}_text_global_skew`, false)}
                       onChange={(e) => updateGraphicVar(`${selectedComp}_text_skew`, e.target.value, false, true)} 
-                      onMouseUp={() => pushHistory(state?.graphics_config)}
-                      onTouchEnd={() => pushHistory(state?.graphics_config)}
+                      onMouseUp={() => pushHistory(stateRef.current?.graphics_config)}
+                      onTouchEnd={() => pushHistory(stateRef.current?.graphics_config)}
                     />
                     <input 
                       type="number" className="sync-num" 
@@ -1852,7 +1938,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
 
                 <hr style={{ borderColor: themeVars.borderCol, margin: '15px 0' }} />
 
-                {/* BORDER COLOR ROW */}
                 <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                   <label>Border Color:</label>
                   <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -1878,8 +1963,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                       type="range" min="0" max="20" 
                       value={getGVar(`${selectedComp}_border_width`, '0')} 
                       onChange={(e) => updateGraphicVar(`${selectedComp}_border_width`, e.target.value, false, true)} 
-                      onMouseUp={() => pushHistory(state?.graphics_config)}
-                      onTouchEnd={() => pushHistory(state?.graphics_config)}
+                      onMouseUp={() => pushHistory(stateRef.current?.graphics_config)}
+                      onTouchEnd={() => pushHistory(stateRef.current?.graphics_config)}
                     />
                     <input 
                       type="number" className="sync-num" 
@@ -1892,7 +1977,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
 
                 <hr style={{ borderColor: themeVars.borderCol, margin: '15px 0' }} />
 
-                {/* UPDATED LAYER SYSTEM OPTIONS */}
                 <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
                   <label>Layer System:</label>
                   <select 
@@ -1920,7 +2004,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                   </select>
                 </div>
 
-                {/* INDEPENDENT COLOR ALPHA SLIDERS FOR EACH BACKGROUND COLOR */}
                 {bgType !== 'clear' && (
                   <>
                     <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
@@ -1929,8 +2012,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                         <input 
                           type="color" 
                           value={
-                            selectedComp === 'awayTeam' ? state.away_color || getGVar('awayTeam_bg_color', '#00468b') :
-                            selectedComp === 'homeTeam' ? state.home_color || getGVar('homeTeam_bg_color', '#222222') :
+                            selectedComp === 'awayTeam' ? stateRef.current?.away_color || getGVar('awayTeam_bg_color', '#00468b') :
+                            selectedComp === 'homeTeam' ? stateRef.current?.home_color || getGVar('homeTeam_bg_color', '#222222') :
                             getGVar(`${selectedComp}_bg_color`, '#111111')
                           } 
                           onChange={(e) => {
@@ -1950,8 +2033,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                         <input 
                           type="text" 
                           value={
-                            selectedComp === 'awayTeam' ? state.away_color || getGVar('awayTeam_bg_color', '#00468b') :
-                            selectedComp === 'homeTeam' ? state.home_color || getGVar('homeTeam_bg_color', '#222222') :
+                            selectedComp === 'awayTeam' ? stateRef.current?.away_color || getGVar('awayTeam_bg_color', '#00468b') :
+                            selectedComp === 'homeTeam' ? stateRef.current?.home_color || getGVar('homeTeam_bg_color', '#222222') :
                             getGVar(`${selectedComp}_bg_color`, '#111111')
                           } 
                           onChange={(e) => {
@@ -1978,8 +2061,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                           type="range" min="0" max="100" 
                           value={getGVar(`${selectedComp}_col1_alpha`, '100')} 
                           onChange={(e) => updateGraphicVar(`${selectedComp}_col1_alpha`, e.target.value, false, true)} 
-                          onMouseUp={() => pushHistory(state?.graphics_config)}
-                          onTouchEnd={() => pushHistory(state?.graphics_config)}
+                          onMouseUp={() => pushHistory(stateRef.current?.graphics_config)}
+                          onTouchEnd={() => pushHistory(stateRef.current?.graphics_config)}
                         />
                         <input 
                           type="number" className="sync-num" 
@@ -2019,8 +2102,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                           type="range" min="0" max="100" 
                           value={getGVar(`${selectedComp}_col3_alpha`, '100')} 
                           onChange={(e) => updateGraphicVar(`${selectedComp}_col3_alpha`, e.target.value, false, true)} 
-                          onMouseUp={() => pushHistory(state?.graphics_config)}
-                          onTouchEnd={() => pushHistory(state?.graphics_config)}
+                          onMouseUp={() => pushHistory(stateRef.current?.graphics_config)}
+                          onTouchEnd={() => pushHistory(stateRef.current?.graphics_config)}
                         />
                         <input 
                           type="number" className="sync-num" 
@@ -2038,8 +2121,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                           type="range" min="0" max="100" 
                           value={getGVar(`${selectedComp}_mid_pos`, '50')} 
                           onChange={(e) => updateGraphicVar(`${selectedComp}_mid_pos`, e.target.value, false, true)} 
-                          onMouseUp={() => pushHistory(state?.graphics_config)}
-                          onTouchEnd={() => pushHistory(state?.graphics_config)}
+                          onMouseUp={() => pushHistory(stateRef.current?.graphics_config)}
+                          onTouchEnd={() => pushHistory(stateRef.current?.graphics_config)}
                         />
                         <input 
                           type="number" className="sync-num" 
@@ -2057,8 +2140,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                           type="range" min="0" max="100" 
                           value={getGVar(`${selectedComp}_mid_width`, '0')} 
                           onChange={(e) => updateGraphicVar(`${selectedComp}_mid_width`, e.target.value, false, true)} 
-                          onMouseUp={() => pushHistory(state?.graphics_config)}
-                          onTouchEnd={() => pushHistory(state?.graphics_config)}
+                          onMouseUp={() => pushHistory(stateRef.current?.graphics_config)}
+                          onTouchEnd={() => pushHistory(stateRef.current?.graphics_config)}
                         />
                         <input 
                           type="number" className="sync-num" 
@@ -2098,8 +2181,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                           type="range" min="0" max="100" 
                           value={getGVar(`${selectedComp}_col2_alpha`, '100')} 
                           onChange={(e) => updateGraphicVar(`${selectedComp}_col2_alpha`, e.target.value, false, true)} 
-                          onMouseUp={() => pushHistory(state?.graphics_config)}
-                          onTouchEnd={() => pushHistory(state?.graphics_config)}
+                          onMouseUp={() => pushHistory(stateRef.current?.graphics_config)}
+                          onTouchEnd={() => pushHistory(stateRef.current?.graphics_config)}
                         />
                         <input 
                           type="number" className="sync-num" 
@@ -2120,8 +2203,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                         type="range" min="0" max="360" 
                         value={getGVar(`${selectedComp}_bg_angle`, '90')} 
                         onChange={(e) => updateGraphicVar(`${selectedComp}_bg_angle`, e.target.value, false, true)} 
-                        onMouseUp={() => pushHistory(state?.graphics_config)}
-                        onTouchEnd={() => pushHistory(state?.graphics_config)}
+                        onMouseUp={() => pushHistory(stateRef.current?.graphics_config)}
+                        onTouchEnd={() => pushHistory(stateRef.current?.graphics_config)}
                       />
                       <input 
                         type="number" className="sync-num" 
@@ -2141,8 +2224,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                         type="range" min="0" max="100" 
                         value={getGVar(`${selectedComp}_bg_alpha`, '100')} 
                         onChange={(e) => updateGraphicVar(`${selectedComp}_bg_alpha`, e.target.value, false, true)} 
-                        onMouseUp={() => pushHistory(state?.graphics_config)}
-                        onTouchEnd={() => pushHistory(state?.graphics_config)}
+                        onMouseUp={() => pushHistory(stateRef.current?.graphics_config)}
+                        onTouchEnd={() => pushHistory(stateRef.current?.graphics_config)}
                       />
                       <input 
                         type="number" className="sync-num" 
@@ -2155,7 +2238,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                 )}
               </div>
 
-              {/* MEDIA PANEL WITH MAX 1000% SCALE */}
               <div style={{ flex: '1 1 250px' }}>
                 <div className="row" style={{ alignItems: 'flex-start' }}>
                   <label>BG Media (Img/Vid):</label>
@@ -2179,22 +2261,22 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                       }}>
                         {currentIsVideo ? (
                           <video 
-                            key={`${currentMediaUrl}_${currentMediaLoop}_${currentMediaTs}`}
+                            key={`vid_${currentMediaUrl}`}
                             src={currentMediaUrl} 
                             autoPlay loop muted playsInline
                             style={{ 
                               width: '100%', height: '100%', objectFit: 'contain', position: 'absolute', top: 0, left: 0,
-                              opacity: parseFloat(currentImgAlpha) / 100,
+                              opacity: parseFloat(currentImgAlpha) / 100, transformOrigin: 'center',
                               transform: `translate(${currentImgX}%, ${currentImgY}%) scale(${parseFloat(currentImgScale) / 100}) skewX(${mediaComputedSkew}deg)`
                             }} 
                           />
                         ) : (
                           <img 
-                            key={`${currentMediaUrl}_${currentMediaTs}`}
+                            key={`img_${currentMediaUrl}`}
                             src={currentMediaUrl} alt="Media Preview"
                             style={{ 
                               width: '100%', height: '100%', objectFit: 'contain', position: 'absolute', top: 0, left: 0,
-                              opacity: parseFloat(currentImgAlpha) / 100,
+                              opacity: parseFloat(currentImgAlpha) / 100, transformOrigin: 'center',
                               transform: `translate(${currentImgX}%, ${currentImgY}%) scale(${parseFloat(currentImgScale) / 100}) skewX(${mediaComputedSkew}deg)`
                             }} 
                           />
@@ -2221,7 +2303,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                   </div>
                 )}
 
-                {/* SCALE SLIDER WITH MAX 1000% */}
                 <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '10px' }}>
                   <label>Scale %:</label>
                   <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -2229,8 +2310,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                       type="range" min="10" max="1000" step="5" 
                       value={currentImgScale} 
                       onChange={(e) => updateGraphicVar(`${selectedComp}_img_scale`, e.target.value, false, true)} 
-                      onMouseUp={() => pushHistory(state?.graphics_config)}
-                      onTouchEnd={() => pushHistory(state?.graphics_config)}
+                      onMouseUp={() => pushHistory(stateRef.current?.graphics_config)}
+                      onTouchEnd={() => pushHistory(stateRef.current?.graphics_config)}
                     />
                     <input 
                       type="number" className="sync-num" 
@@ -2241,7 +2322,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                   </div>
                 </div>
 
-                {/* ALPHA SLIDER WITH MOUSE-UP HISTORY PUSH */}
                 <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '10px' }}>
                   <label>Alpha %:</label>
                   <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -2249,8 +2329,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                       type="range" min="0" max="100" 
                       value={currentImgAlpha} 
                       onChange={(e) => updateGraphicVar(`${selectedComp}_img_alpha`, e.target.value, false, true)} 
-                      onMouseUp={() => pushHistory(state?.graphics_config)}
-                      onTouchEnd={() => pushHistory(state?.graphics_config)}
+                      onMouseUp={() => pushHistory(stateRef.current?.graphics_config)}
+                      onTouchEnd={() => pushHistory(stateRef.current?.graphics_config)}
                     />
                     <input 
                       type="number" className="sync-num" 
@@ -2261,7 +2341,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                   </div>
                 </div>
 
-                {/* POS X SLIDER WITH MOUSE-UP HISTORY PUSH */}
                 <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '10px' }}>
                   <label>Pos X %:</label>
                   <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -2269,8 +2348,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                       type="range" min="-200" max="200" 
                       value={currentImgX} 
                       onChange={(e) => updateGraphicVar(`${selectedComp}_img_x`, e.target.value, false, true)} 
-                      onMouseUp={() => pushHistory(state?.graphics_config)}
-                      onTouchEnd={() => pushHistory(state?.graphics_config)}
+                      onMouseUp={() => pushHistory(stateRef.current?.graphics_config)}
+                      onTouchEnd={() => pushHistory(stateRef.current?.graphics_config)}
                     />
                     <input 
                       type="number" className="sync-num" 
@@ -2281,7 +2360,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                   </div>
                 </div>
 
-                {/* POS Y SLIDER WITH MOUSE-UP HISTORY PUSH */}
                 <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: '10px' }}>
                   <label>Pos Y %:</label>
                   <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -2289,8 +2367,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                       type="range" min="-200" max="200" 
                       value={currentImgY} 
                       onChange={(e) => updateGraphicVar(`${selectedComp}_img_y`, e.target.value, false, true)} 
-                      onMouseUp={() => pushHistory(state?.graphics_config)}
-                      onTouchEnd={() => pushHistory(state?.graphics_config)}
+                      onMouseUp={() => pushHistory(stateRef.current?.graphics_config)}
+                      onTouchEnd={() => pushHistory(stateRef.current?.graphics_config)}
                     />
                     <input 
                       type="number" className="sync-num" 
