@@ -19,6 +19,84 @@ interface ScoreboardState {
   graphics_config: Record<string, any>;
 }
 
+interface RolloutSeqItem { id?: string; text: string; dur?: string | number; anim?: string; animDur?: string | number; }
+
+// ---------- Text sequences ----------
+// Which graphics_config sequence a right-panel mode reads. Away/Home goals share one.
+const seqKeyForMode = (mode: string) =>
+  mode.startsWith('rollout') ? mode :
+  mode === 'delayedPenalty' ? 'delayedPenalty' :
+  (mode === 'awayGoal' || mode === 'homeGoal' || mode === 'goal') ? 'goal' : '';
+
+const resolveSeq = (gc: Record<string, any>, seqKey: string, teamName?: string): RolloutSeqItem[] => {
+  if (!seqKey) return [];
+  const raw = gc?.[`${seqKey}_seq`];
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((it: any) => it && String(it.text ?? '').trim() !== '')
+    .map((it: any) => ({ ...it, text: teamName !== undefined ? String(it.text).replace(/{TEAM}/g, teamName) : String(it.text) }));
+};
+
+const isSeqLoop = (gc: Record<string, any>, seqKey: string) => {
+  const v = gc?.[`${seqKey}_seq_loop`];
+  return v === undefined || v === true || v === 'true';
+};
+
+// Steps through a sequence locally. Restarts only when the active element or the
+// timing changes (not on text edits). Returns the current index and a cycle count
+// used in React keys so each text's animation replays.
+function useTextSequence(items: RolloutSeqItem[], loop: boolean, activeKey: string) {
+  const sig = `${activeKey}|${loop}|${items.length}|${items.map(it => it.dur).join(',')}`;
+  const [pos, setPos] = useState({ sig: '', index: 0, cycle: 0 });
+
+  useEffect(() => {
+    setPos({ sig, index: 0, cycle: 0 });
+    if (!activeKey || items.length < 2) return;
+
+    let index = 0;
+    let cycle = 0;
+    let timer: NodeJS.Timeout;
+    const schedule = () => {
+      const d = Math.max(0.3, parseFloat(String(items[index]?.dur ?? '3')) || 3);
+      timer = setTimeout(() => {
+        if (index + 1 >= items.length) {
+          if (!loop) return; // hold the last text
+          index = 0;
+        } else {
+          index++;
+        }
+        cycle++;
+        setPos({ sig, index, cycle });
+        schedule();
+      }, d * 1000);
+    };
+    schedule();
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sig]);
+
+  const current = pos.sig === sig;
+  return {
+    index: current ? Math.min(pos.index, Math.max(0, items.length - 1)) : 0,
+    cycle: current ? pos.cycle : 0,
+  };
+}
+
+// Longest we will hold back a rollout / banner while its background video buffers.
+const MEDIA_WAIT_MS = 250;
+
+// Mirrors getCompVar's media inheritance (goal panels fall back to the team media).
+const resolveMedia = (gc: Record<string, any>, key: string) => {
+  const direct = gc?.[`${key}_media_url`];
+  if (direct) return { url: direct as string, isVid: !!gc[`${key}_is_video`] };
+  if (key === 'awayGoal' || key === 'homeGoal') {
+    const team = key === 'awayGoal' ? 'awayTeam' : 'homeTeam';
+    const inherited = gc?.[`${team}_media_url`];
+    if (inherited) return { url: inherited as string, isVid: !!gc[`${team}_is_video`] };
+  }
+  return { url: '', isVid: false };
+};
+
 export default function OBSOverlayPage({ params }: { params: Promise<{ id: string }> }) {
   const [id, setId] = useState<string | null>(null);
   const [state, setState] = useState<ScoreboardState | null>(null);
@@ -36,6 +114,35 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
   const activePanelModeRef = useRef('none');
   const bannerActiveRef = useRef(false);
 
+  // Ordering guards: the same update arrives via up to three paths (local
+  // BroadcastChannel, Supabase broadcast, Postgres change echo) at different
+  // speeds. Without these, a late copy of an OLD state overwrites a newer one,
+  // which is what made penalties reappear after CLEAR ALL and made the PP
+  // panel flicker / vanish.
+  const lastSeqRef = useRef<number>(0);
+  const lastBroadcastAtRef = useRef<number>(0);
+  const panelExitTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const bannerExitTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Hidden, fully-buffered copies of every background video (keyed by URL) so a
+  // rollout's video is already in the media cache when the panel mounts.
+  const preloadVideosRef = useRef<Map<string, HTMLVideoElement>>(new Map());
+  const panelShowTokenRef = useRef(0);
+  const bannerShowTokenRef = useRef(0);
+
+  // Resolves when the video can play, or after MEDIA_WAIT_MS — whichever is first.
+  const waitForMedia = (gcfg: Record<string, any>, key: string): Promise<void> => {
+    const { url, isVid } = resolveMedia(gcfg || {}, key);
+    if (!url || !isVid) return Promise.resolve();
+    const vid = preloadVideosRef.current.get(url);
+    if (!vid || vid.readyState >= 3) return Promise.resolve();
+    return new Promise(resolve => {
+      const done = () => { clearTimeout(t); vid.removeEventListener('canplay', done); resolve(); };
+      const t = setTimeout(done, MEDIA_WAIT_MS);
+      vid.addEventListener('canplay', done);
+    });
+  };
+
   useEffect(() => {
     params.then(p => setId(p.id));
   }, [params]);
@@ -44,6 +151,8 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
     if (!id) return;
     const fetchState = async () => {
       const { data } = await supabase.from('scoreboards').select('*').eq('id', id).single();
+      // If live broadcasts already arrived, the DB row is older than what we show
+      if (data && lastSeqRef.current > 0) return;
       if (data) {
         stateRef.current = data;
         setState(data);
@@ -68,8 +177,23 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
     };
     fetchState();
 
-    const handleStateUpdate = (incomingState: any) => {
+    const handleStateUpdate = (incomingState: any, source: 'broadcast' | 'db') => {
+      if (source === 'db') {
+        // DB echoes carry whatever clock/penalties were last written, which is
+        // usually seconds behind. Only trust them when the control panel is not
+        // actively broadcasting (e.g. it is closed).
+        if (Date.now() - lastBroadcastAtRef.current < 5000) return;
+      } else {
+        const seq = Number(incomingState?._seq) || 0;
+        if (seq > 0) {
+          if (seq <= lastSeqRef.current) return; // stale or duplicate copy
+          lastSeqRef.current = seq;
+        }
+        lastBroadcastAtRef.current = Date.now();
+      }
+
       const mergedState = { ...incomingState };
+      delete mergedState._seq;
 
       if (mergedState.graphics_config === undefined || mergedState.graphics_config === null) {
         mergedState.graphics_config = stateRef.current?.graphics_config || {};
@@ -85,55 +209,89 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
       setState(mergedState as ScoreboardState);
 
       const newMode = mergedState.right_panel_mode || 'none';
-      if (newMode === 'none' && activePanelModeRef.current !== 'none') {
-        setPanelExiting(true);
-        setTimeout(() => {
-          setPanelExiting(false);
-          setDisplayedPanelMode('none');
-          activePanelModeRef.current = 'none';
-        }, 500);
-      } else if (newMode !== 'none') {
+      const showPanel = () => {
+        // A new rollout arrived mid-exit: cancel the pending hide so it can't
+        // wipe out the panel that was just shown.
+        if (panelExitTimerRef.current) {
+          clearTimeout(panelExitTimerRef.current);
+          panelExitTimerRef.current = null;
+        }
         setPanelExiting(false);
         setDisplayedPanelMode(newMode);
         setDisplayedPanelText(mergedState.right_panel_text || '');
         activePanelModeRef.current = newMode;
+      };
+
+      if (newMode === 'none') panelShowTokenRef.current++; // cancel any pending show
+      if (newMode === 'none' && activePanelModeRef.current !== 'none') {
+        if (!panelExitTimerRef.current) {
+          setPanelExiting(true);
+          panelExitTimerRef.current = setTimeout(() => {
+            panelExitTimerRef.current = null;
+            setPanelExiting(false);
+            setDisplayedPanelMode('none');
+            activePanelModeRef.current = 'none';
+          }, 500);
+        }
+      } else if (newMode !== 'none') {
+        if (newMode === activePanelModeRef.current) {
+          showPanel(); // same panel, text update only
+        } else {
+          const token = ++panelShowTokenRef.current;
+          waitForMedia(mergedState.graphics_config, newMode).then(() => {
+            if (token === panelShowTokenRef.current) showPanel();
+          });
+        }
       }
 
       const isBannerOn = !!mergedState.banner_active;
       if (!isBannerOn && bannerActiveRef.current) {
+        bannerShowTokenRef.current++; // cancel a banner still waiting on its media
         setBannerExiting(true);
         bannerActiveRef.current = false;
-        setTimeout(() => {
+        if (bannerExitTimerRef.current) clearTimeout(bannerExitTimerRef.current);
+        bannerExitTimerRef.current = setTimeout(() => {
+          bannerExitTimerRef.current = null;
           setBannerExiting(false);
           setDisplayedBannerActive(false);
         }, 500);
       } else if (isBannerOn && !bannerActiveRef.current) {
-        setBannerExiting(false);
-        setDisplayedBannerActive(true);
-        setDisplayedBannerText(mergedState.banner_text || '');
         bannerActiveRef.current = true;
+        const token = ++bannerShowTokenRef.current;
+        waitForMedia(mergedState.graphics_config, 'banner').then(() => {
+          if (token !== bannerShowTokenRef.current || !bannerActiveRef.current) return;
+          if (bannerExitTimerRef.current) {
+            clearTimeout(bannerExitTimerRef.current);
+            bannerExitTimerRef.current = null;
+          }
+          setBannerExiting(false);
+          setDisplayedBannerActive(true);
+          setDisplayedBannerText(mergedState.banner_text || '');
+        });
       } else if (isBannerOn) {
         setDisplayedBannerText(mergedState.banner_text || '');
       }
     };
 
     const channel = supabase.channel(`scoreboard_${id}`)
-      .on('broadcast', { event: 'STATE_UPDATE' }, ({ payload }) => handleStateUpdate(payload))
+      .on('broadcast', { event: 'STATE_UPDATE' }, ({ payload }) => handleStateUpdate(payload, 'broadcast'))
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'scoreboards', filter: `id=eq.${id}` },
-        (payload) => handleStateUpdate(payload.new)
+        (payload) => handleStateUpdate(payload.new, 'db')
       ).subscribe();
 
     let localChannel: BroadcastChannel | null = null;
     if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
       localChannel = new BroadcastChannel(`scoreboard_local_${id}`);
       localChannel.onmessage = (event) => {
-        if (event.data) handleStateUpdate(event.data);
+        if (event.data) handleStateUpdate(event.data, 'broadcast');
       };
     }
 
     return () => {
       supabase.removeChannel(channel);
       if (localChannel) localChannel.close();
+      if (panelExitTimerRef.current) clearTimeout(panelExitTimerRef.current);
+      if (bannerExitTimerRef.current) clearTimeout(bannerExitTimerRef.current);
     };
   }, [id]);
 
@@ -150,6 +308,18 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
       document.documentElement.style.backgroundColor = '';
     };
   }, [isChromaGreen]);
+
+  // ---------- Text sequences ----------
+  const gcLive = state?.graphics_config || {};
+  const panelSeqKey = seqKeyForMode(displayedPanelMode);
+  const goalTeam =
+    displayedPanelMode === 'awayGoal' ? (state?.away_name || 'AWAY') :
+    displayedPanelMode === 'homeGoal' ? (state?.home_name || 'HOME') : undefined;
+  const panelSeqItems = resolveSeq(gcLive, panelSeqKey, goalTeam);
+  const panelSeq = useTextSequence(panelSeqItems, isSeqLoop(gcLive, panelSeqKey), panelSeqKey ? displayedPanelMode : '');
+
+  const bannerSeqItems = displayedBannerActive ? resolveSeq(gcLive, 'banner') : [];
+  const bannerSeq = useTextSequence(bannerSeqItems, isSeqLoop(gcLive, 'banner'), displayedBannerActive ? 'banner' : '');
 
   if (!state) return null;
 
@@ -182,6 +352,48 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
   const isGoal = isAwayGoal || isHomeGoal || currentMode === 'goal';
 
   const showRightPanel = isRollout || isDelayed || ppActive || isGoal || panelExiting;
+
+  // Current side-panel text: sequence item if one is configured, else the plain text.
+  const panelHasText = isRollout || isGoal || isDelayed;
+  const basePanelText = isDelayed
+    ? (gc.delayedPenalty_text || 'DELAYED PENALTY')
+    : (displayedPanelText || state.right_panel_text || '');
+  const activeSeqItem = panelHasText && panelSeqItems.length > 0 ? panelSeqItems[panelSeq.index] : null;
+  const panelText = activeSeqItem ? activeSeqItem.text : basePanelText;
+  const panelTextKey = activeSeqItem
+    ? `seq_${panelSeq.index}_${panelSeq.cycle}_${activeSeqItem.text}`
+    : `${basePanelText}`;
+  const panelAnimOverride = activeSeqItem ? { anim: activeSeqItem.anim, dur: activeSeqItem.animDur } : undefined;
+  // Every text the panel may show; the panel is sized to the longest so it never shrinks mid-sequence.
+  const panelSizerTexts: string[] = panelHasText
+    ? (panelSeqItems.length > 0 ? panelSeqItems.map(it => it.text) : [basePanelText])
+    : [];
+
+  // Banner text (sequence-aware)
+  const activeBannerItem = bannerSeqItems.length > 0 ? bannerSeqItems[bannerSeq.index] : null;
+  const bannerText = activeBannerItem ? activeBannerItem.text : (displayedBannerText || state.banner_text);
+  const bannerTextKey = activeBannerItem
+    ? `seq_${bannerSeq.index}_${bannerSeq.cycle}_${activeBannerItem.text}`
+    : `${displayedBannerText}_${state.banner_text}`;
+  const bannerAnimOverride = activeBannerItem ? { anim: activeBannerItem.anim, dur: activeBannerItem.animDur } : undefined;
+
+  // Side-panel text in a grid cell: invisible copies of every possible text share the
+  // cell with the visible (animated) one, so the panel is as wide as the longest
+  // text and holds that width while shorter texts play.
+  const renderPanelText = (spanKey: string, spanStyle: React.CSSProperties, content: React.ReactNode, sizers: string[]) => (
+    <span style={{ display: 'inline-grid', position: 'relative', zIndex: 3, flexShrink: 0, alignItems: 'center' }}>
+      {sizers.map((t, i) => (
+        <span
+          key={`sz_${i}`}
+          aria-hidden="true"
+          style={{ gridArea: '1 / 1', visibility: 'hidden', pointerEvents: 'none', whiteSpace: 'nowrap', paddingRight: spanStyle.paddingRight, fontSize: spanStyle.fontSize, lineHeight: spanStyle.lineHeight }}
+        >
+          {t}
+        </span>
+      ))}
+      <span key={spanKey} style={{ ...spanStyle, gridArea: '1 / 1', justifySelf: 'center' }}>{content}</span>
+    </span>
+  );
 
   const activePanelKey = 
     ppActive ? 'ppPanel' :
@@ -264,9 +476,24 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
     const fontSize = `${getCompVar(compKey, 'font_size', defaultSize)}px`;
     const fontFam = getCompVar(compKey, 'font_family', 'var(--global-font)');
     
-    const strokeWidth = getCompVar(compKey, 'stroke_width', 0);
+    const strokeWidthNum = parseInt(getCompVar(compKey, 'stroke_width', 0)) || 0;
     const strokeColor = getCompVar(compKey, 'stroke_color', '#000000');
-    const strokeCss = strokeWidth > 0 ? `${strokeWidth}px ${strokeColor}` : 'none';
+    
+    let shadowCss = 'none';
+    if (strokeWidthNum > 0) {
+      const sw = strokeWidthNum;
+      const sc = strokeColor;
+      shadowCss = `
+        -${sw}px -${sw}px 0 ${sc},
+         0px    -${sw}px 0 ${sc},
+         ${sw}px -${sw}px 0 ${sc},
+         ${sw}px  0px    0 ${sc},
+         ${sw}px  ${sw}px 0 ${sc},
+         0px     ${sw}px 0 ${sc},
+        -${sw}px  ${sw}px 0 ${sc},
+        -${sw}px  0px    0 ${sc}
+      `;
+    }
 
     const bgAlpha = parseFloat(getCompVar(compKey, 'bg_alpha', 100)) / 100;
 
@@ -275,8 +502,7 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
       fontSize: fontSize,
       fontFamily: fontFam,
       border: 'none', 
-      WebkitTextStroke: strokeCss,
-      paintOrder: 'stroke fill',
+      textShadow: shadowCss,
       opacity: bgAlpha,
       position: 'relative' as const,
       overflow: 'visible' as const,
@@ -329,18 +555,21 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
 
     return (
       <>
-        <div style={{ position: 'absolute', inset: 0, overflow: 'hidden', borderRadius: 'inherit', zIndex: 0 }}>
+        {/* clipPath + isolation make this a hard clip that also applies to GPU-composited
+            children (video / transformed images). overflow:hidden alone lets a composited
+            media layer snap 1-2px past the box edge inside the skewed bar. */}
+        <div style={{ position: 'absolute', inset: 0, overflow: 'hidden', borderRadius: 'inherit', zIndex: 0, clipPath: 'inset(0)', isolation: 'isolate', contain: 'paint' }}>
           <div style={{ ...fillStyle, zIndex: colorZIndex, ...colorStyle }} />
           {url && (
-            <div style={{ ...fillStyle, zIndex: mediaZIndex, display: 'flex', alignItems: 'center', justifyContent: 'center', transform: 'translateZ(0)', willChange: 'transform' }}>
+            <div style={{ ...fillStyle, zIndex: mediaZIndex, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               {isVid ? (
                 <video 
                   key={`vid_${url}`} 
                   src={url}
-                  autoPlay loop={isLoop} muted playsInline
+                  autoPlay loop={isLoop} muted playsInline preload="auto"
                   style={{
                     width: '100%', height: '100%', objectFit: 'contain', pointerEvents: 'none',
-                    opacity: imgAlpha, willChange: 'transform', transformOrigin: 'center',
+                    opacity: imgAlpha, transformOrigin: 'center',
                     transform: `translate(${imgX}%, ${imgY}%) scale(${imgScale}) skewX(${skewVal}deg)`
                   }}
                 />
@@ -350,7 +579,7 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
                   src={url} alt="Background Media" 
                   style={{
                     width: '100%', height: '100%', objectFit: 'contain', pointerEvents: 'none',
-                    opacity: imgAlpha, willChange: 'transform', transformOrigin: 'center',
+                    opacity: imgAlpha, transformOrigin: 'center',
                     transform: `translate(${imgX}%, ${imgY}%) scale(${imgScale}) skewX(${skewVal}deg)`
                   }}
                 />
@@ -370,41 +599,121 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
     );
   };
 
-  const getTextAnimStyle = (compKey: string) => {
-    const animType = getCompVar(compKey, 'text_anim', 'none');
+  // Keyframes for intensity-driven animations are generated per intensity value
+  // and injected in a <style> at the end of the render. Because the intensity is
+  // part of the keyframe NAME, moving the slider changes the animation name, which
+  // makes the browser replay it immediately (live preview), and the values are
+  // baked in rather than relying on var() inside @keyframes.
+  const dynKeyframes = new Map<string, string>();
+
+  const buildIntensityKeyframes = (type: string, i: number): string | null => {
+    const T = 'var(--text-skew, skewX(0deg))'; // keeps the text's own skew during the animation
+    const name = `ta_${type}_${Math.round(i * 100)}`;
+    if (dynKeyframes.has(name)) return name;
+    const r = (n: number) => Math.round(n * 1000) / 1000;
+    let body = '';
+    switch (type) {
+      case 'zoomIn': // starts smaller the higher the intensity
+        body = `0%{transform:${T} scale(${r(Math.max(0.02, 1 - 0.5 * i))});opacity:0}100%{transform:${T} scale(1);opacity:1}`; break;
+      case 'zoomOut': // starts larger the higher the intensity
+        body = `0%{transform:${T} scale(${r(1 + 0.5 * i)});opacity:0}100%{transform:${T} scale(1);opacity:1}`; break;
+      case 'enlarge': // bigger growth plus a proportional overshoot
+        body = `0%{transform:${T} scale(${r(Math.max(0.05, 1 - 0.2 * i))})}70%{transform:${T} scale(${r(1 + 0.06 * i)})}100%{transform:${T} scale(1)}`; break;
+      case 'spinInLeft':
+        body = `0%{transform:${T} translateX(${r(-50 * i)}px) rotate(${r(-180 * i)}deg);opacity:0}100%{transform:${T} translateX(0) rotate(0deg);opacity:1}`; break;
+      case 'spinInRight':
+        body = `0%{transform:${T} translateX(${r(50 * i)}px) rotate(${r(180 * i)}deg);opacity:0}100%{transform:${T} translateX(0) rotate(0deg);opacity:1}`; break;
+      case 'pushLeft':
+        body = `0%{transform:${T} translateX(${r(50 * i)}px);opacity:0}100%{transform:${T} translateX(0);opacity:1}`; break;
+      case 'pushRight':
+        body = `0%{transform:${T} translateX(${r(-50 * i)}px);opacity:0}100%{transform:${T} translateX(0);opacity:1}`; break;
+      case 'pushUp':
+        body = `0%{transform:${T} translateY(${r(50 * i)}px);opacity:0}100%{transform:${T} translateY(0);opacity:1}`; break;
+      case 'pushDown':
+        body = `0%{transform:${T} translateY(${r(-50 * i)}px);opacity:0}100%{transform:${T} translateY(0);opacity:1}`; break;
+      case 'rightInsert':
+        body = `0%{transform:${T} translateX(${r(100 * i)}%);opacity:0}100%{transform:${T} translateX(0);opacity:1}`; break;
+      case 'leftInsert':
+        body = `0%{transform:${T} translateX(${r(-100 * i)}%);opacity:0}100%{transform:${T} translateX(0);opacity:1}`; break;
+      case 'blurLeft': // more blur and travel with intensity
+        body = `0%{filter:blur(${r(10 * i)}px);transform:${T} translateX(${r(-20 * i)}px);opacity:0}100%{filter:blur(0px);transform:${T} translateX(0);opacity:1}`; break;
+      case 'blurRight':
+        body = `0%{filter:blur(${r(10 * i)}px);transform:${T} translateX(${r(20 * i)}px);opacity:0}100%{filter:blur(0px);transform:${T} translateX(0);opacity:1}`; break;
+      case 'glitch': { // bigger jitter with intensity
+        const o = r(2 * i);
+        body = `0%{clip-path:inset(10% 0 80% 0);transform:${T} translate(${-o}px,${o}px)}20%{clip-path:inset(80% 0 5% 0);transform:${T} translate(${o}px,${-o}px)}40%{clip-path:inset(40% 0 40% 0);transform:${T} translate(${-o}px,${-o}px)}60%{clip-path:inset(20% 0 60% 0);transform:${T} translate(${o}px,${o}px)}80%{clip-path:inset(60% 0 20% 0);transform:${T} translate(${-o}px,0)}100%{clip-path:inset(0 0 0 0);transform:${T} translate(0,0)}`; break;
+      }
+      case 'glitchFlicker': // deeper flicker with intensity
+        body = `0%{opacity:1}50%{opacity:${r(Math.max(0.1, 1 - 0.2 * i))}}100%{opacity:1}`; break;
+      case 'randomFlash': { // more flashes with intensity
+        const flashes = Math.max(1, Math.round(2 * i));
+        const steps = flashes * 2;
+        const frames: string[] = [];
+        for (let k = 0; k < steps; k++) frames.push(`${r((k / steps) * 100)}%{opacity:${k % 2 === 0 ? 0 : 1}}`);
+        frames.push('100%{opacity:1}');
+        body = frames.join(''); break;
+      }
+      default: return null;
+    }
+    dynKeyframes.set(name, `@keyframes ${name}{${body}}`);
+    return name;
+  };
+
+  // override lets a rollout sequence item use its own effect / speed
+  const getTextAnimStyle = (compKey: string, override?: { anim?: string; dur?: string | number }) => {
+    const animType = override?.anim ? override.anim : getCompVar(compKey, 'text_anim', 'none');
     if (animType === 'none') return {};
 
-    const durVal = parseInt(getCompVar(compKey, 'text_anim_dur', '0.6'));
+    const hasDurOverride = override?.dur !== undefined && override?.dur !== '' && !isNaN(parseFloat(String(override.dur)));
+    const durVal = hasDurOverride ? parseFloat(String(override!.dur)) : parseFloat(getCompVar(compKey, 'text_anim_dur', '0.6'));
     const dur = `${isNaN(durVal) ? 0.6 : durVal}s`;
+    
+    const intensityVal = parseFloat(getCompVar(compKey, 'text_anim_intensity', '1.0'));
+    const intensity = isNaN(intensityVal) ? 1.0 : Math.min(5, Math.max(0.1, intensityVal));
+    const kf = (type: string) => buildIntensityKeyframes(type, intensity) as string;
+
+    let animStyle: any = {};
 
     switch (animType) {
-      case 'wipeLeft': return { animation: `animWipeLeft ${dur} ease-out forwards` };
-      case 'wipeRight': return { animation: `animWipeRight ${dur} ease-out forwards` };
-      case 'wipeUp': return { animation: `animWipeUp ${dur} ease-out forwards` };
-      case 'wipeDown': return { animation: `animWipeDown ${dur} ease-out forwards` };
-      case 'fadeIn': return { animation: `animFadeIn ${dur} ease-out forwards` };
-      case 'fadeOut': return { animation: `animFadeOut ${dur} ease-out forwards` };
-      case 'zoomIn': return { animation: `animZoomIn ${dur} cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards` };
-      case 'zoomOut': return { animation: `animZoomOut ${dur} cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards` };
-      case 'typewriter': return { animation: `animTypewriter ${dur} steps(20, end) forwards`, overflow: 'hidden', whiteSpace: 'nowrap' as const, margin: '0 auto', textAlign: 'center' as const, display: 'inline-block' };
-      case 'glitchTypewriter': return { animation: `animGlitch ${dur} steps(15, end) forwards, animGlitchFlicker 0.2s infinite` };
-      case 'spinInLeft': return { animation: `animSpinInLeft ${dur} ease-out forwards` };
-      case 'spinInRight': return { animation: `animSpinInRight ${dur} ease-out forwards` };
-      case 'pushLeft': return { animation: `animPushLeft ${dur} cubic-bezier(0.34, 1.56, 0.64, 1) forwards` };
-      case 'pushRight': return { animation: `animPushRight ${dur} cubic-bezier(0.34, 1.56, 0.64, 1) forwards` };
-      case 'pushUp': return { animation: `animPushUp ${dur} cubic-bezier(0.34, 1.56, 0.64, 1) forwards` };
-      case 'pushDown': return { animation: `animPushDown ${dur} cubic-bezier(0.34, 1.56, 0.64, 1) forwards` };
-      case 'randomFlash': return { animation: `animRandomFlash ${dur} steps(1, end) forwards` };
-      case 'enlarge': return { animation: `animEnlarge ${dur} cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards` };
-      case 'rightInsert': return { animation: `animRightInsert ${dur} cubic-bezier(0.1, 0.9, 0.2, 1) forwards`, overflow: 'hidden', whiteSpace: 'nowrap' as const };
-      case 'leftInsert': return { animation: `animLeftInsert ${dur} cubic-bezier(0.1, 0.9, 0.2, 1) forwards`, overflow: 'hidden', whiteSpace: 'nowrap' as const };
-      case 'blurLeft': return { animation: `animBlurLeft ${dur} ease-out forwards` };
-      case 'blurRight': return { animation: `animBlurRight ${dur} ease-out forwards` };
-      default: return {};
+      case 'wipeLeft': animStyle = { animation: `animWipeLeft ${dur} ease-out forwards` }; break;
+      case 'wipeRight': animStyle = { animation: `animWipeRight ${dur} ease-out forwards` }; break;
+      case 'wipeUp': animStyle = { animation: `animWipeUp ${dur} ease-out forwards` }; break;
+      case 'wipeDown': animStyle = { animation: `animWipeDown ${dur} ease-out forwards` }; break;
+      case 'fadeIn': animStyle = { animation: `animFadeIn ${dur} ease-out forwards` }; break;
+      case 'fadeOut': animStyle = { animation: `animFadeOut ${dur} ease-out forwards` }; break;
+      case 'zoomIn': animStyle = { animation: `${kf('zoomIn')} ${dur} cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards` }; break;
+      case 'zoomOut': animStyle = { animation: `${kf('zoomOut')} ${dur} cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards` }; break;
+      case 'typewriter': animStyle = { animation: `animTypewriter ${dur} steps(20, end) forwards`, overflow: 'hidden', whiteSpace: 'nowrap' as const, margin: '0 auto', textAlign: 'center' as const, display: 'inline-block' }; break;
+      case 'glitchTypewriter': animStyle = { animation: `${kf('glitch')} ${dur} steps(15, end) forwards, ${kf('glitchFlicker')} 0.2s infinite` }; break;
+      case 'spinInLeft': animStyle = { animation: `${kf('spinInLeft')} ${dur} ease-out forwards` }; break;
+      case 'spinInRight': animStyle = { animation: `${kf('spinInRight')} ${dur} ease-out forwards` }; break;
+      case 'pushLeft': animStyle = { animation: `${kf('pushLeft')} ${dur} cubic-bezier(0.34, 1.56, 0.64, 1) forwards` }; break;
+      case 'pushRight': animStyle = { animation: `${kf('pushRight')} ${dur} cubic-bezier(0.34, 1.56, 0.64, 1) forwards` }; break;
+      case 'pushUp': animStyle = { animation: `${kf('pushUp')} ${dur} cubic-bezier(0.34, 1.56, 0.64, 1) forwards` }; break;
+      case 'pushDown': animStyle = { animation: `${kf('pushDown')} ${dur} cubic-bezier(0.34, 1.56, 0.64, 1) forwards` }; break;
+      case 'randomFlash': animStyle = { animation: `${kf('randomFlash')} ${dur} steps(1, end) forwards` }; break;
+      case 'enlarge': animStyle = { animation: `${kf('enlarge')} ${dur} cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards` }; break;
+      case 'rightInsert': animStyle = { animation: `${kf('rightInsert')} ${dur} cubic-bezier(0.1, 0.9, 0.2, 1) forwards`, overflow: 'hidden', whiteSpace: 'nowrap' as const }; break;
+      case 'leftInsert': animStyle = { animation: `${kf('leftInsert')} ${dur} cubic-bezier(0.1, 0.9, 0.2, 1) forwards`, overflow: 'hidden', whiteSpace: 'nowrap' as const }; break;
+      case 'blurLeft': animStyle = { animation: `${kf('blurLeft')} ${dur} ease-out forwards` }; break;
+      case 'blurRight': animStyle = { animation: `${kf('blurRight')} ${dur} ease-out forwards` }; break;
     }
+
+    // The text's skew is carried into the keyframes via this variable; previously
+    // any transform-based animation wiped the text skew out once it ran.
+    animStyle['--text-skew'] = getTextSkewTransform(compKey);
+
+    return animStyle as React.CSSProperties;
   };
 
   const userSkew = gc.skewAngle ? `${gc.skewAngle}deg` : null;
+  // Overlay placement (Graphics tab > Global Architecture). X is offset from
+  // horizontal centre, Y is distance from the top of the OBS canvas.
+  const numOr = (v: any, d: number) => { const n = parseFloat(v); return isNaN(n) ? d : n; };
+  const overlayPosX = numOr(gc.overlayPosX, 0);
+  const overlayPosY = numOr(gc.overlayPosY, 20);
+  const overlayScale = Math.min(4, Math.max(0.1, numOr(gc.bugScale, 1)));
+
   const skewAngle = userSkew || (layoutStyle === 'style1' ? '-15deg' : '0deg');
 
   const shootoutRounds = state.shootout_rounds || Array(10).fill({ away: 0, home: 0 });
@@ -450,264 +759,279 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
   };
 
   return (
-    <div 
-      id="scoreboard-master-container"
-      style={{
-        backgroundColor: isChromaGreen ? '#00ff00' : 'transparent',
-        minHeight: '100vh', padding: '20px', position: 'relative',
-        fontFamily: gc.globalFont || state.global_font || "'Roboto Condensed', sans-serif"
-      }}
-    >
-      <div style={{ position: 'absolute', top: '20px', left: '50%', transform: 'translateX(-50%)', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+    <>
+      <style>{`
+        @keyframes animRolloutShowFromLeft { 0% { transform: translateX(-5%); opacity: 0; } 100% { transform: translateX(0); opacity: 1; } }
+        @keyframes animRolloutRetractToLeft { 0% { transform: translateX(0); opacity: 1; } 100% { transform: translateX(-5%); opacity: 0; } }
+        @keyframes animWipeLeft { 0% { clip-path: polygon(100% 0, 100% 0, 100% 100%, 100% 100%); } 100% { clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%); } }
+        @keyframes animWipeRight { 0% { clip-path: polygon(0 0, 0 0, 0 100%, 0 100%); } 100% { clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%); } }
+        @keyframes animWipeUp { 0% { clip-path: polygon(0 100%, 100% 100%, 100% 100%, 0 100%); } 100% { clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%); } }
+        @keyframes animWipeDown { 0% { clip-path: polygon(0 0, 100% 0, 100% 0, 0 0); } 100% { clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%); } }
+        @keyframes animFadeIn { 0% { opacity: 0; } 100% { opacity: 1; } }
+        @keyframes animFadeOut { 0% { opacity: 1; } 100% { opacity: 0; } }
+        @keyframes animTypewriter { 0% { width: 0; } 100% { width: 100%; } }
+        @keyframes animRandomFlash { 0% { opacity: 0; } 25% { opacity: 1; } 50% { opacity: 0; } 75% { opacity: 1; } 100% { opacity: 1; } }
+        
+        /* Intensity Scaled Animations */
+        @keyframes animZoomIn { 0% { transform: scale(calc(1 - (0.5 * var(--anim-intensity, 1)))); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
+        @keyframes animZoomOut { 0% { transform: scale(calc(1 + (0.5 * var(--anim-intensity, 1)))); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
+        @keyframes animEnlarge { 0% { transform: scale(calc(1 - (0.2 * var(--anim-intensity, 1)))); } 100% { transform: scale(1); } }
+        @keyframes animGlitch { 0% { clip-path: inset(10% 0 80% 0); transform: translate(calc(-2px * var(--anim-intensity, 1)), calc(2px * var(--anim-intensity, 1))); } 20% { clip-path: inset(80% 0 5% 0); transform: translate(calc(2px * var(--anim-intensity, 1)), calc(-2px * var(--anim-intensity, 1))); } 40% { clip-path: inset(40% 0 40% 0); transform: translate(calc(-2px * var(--anim-intensity, 1)), calc(-2px * var(--anim-intensity, 1))); } 60% { clip-path: inset(20% 0 60% 0); transform: translate(calc(2px * var(--anim-intensity, 1)), calc(2px * var(--anim-intensity, 1))); } 80% { clip-path: inset(60% 0 20% 0); transform: translate(calc(-2px * var(--anim-intensity, 1)), 0); } 100% { clip-path: inset(0 0 0 0); transform: translate(0, 0); } }
+        @keyframes animGlitchFlicker { 0% { opacity: 1; } 50% { opacity: 0.8; } 100% { opacity: 1; } }
+        @keyframes animSpinInLeft { 0% { transform: translateX(calc(-50px * var(--anim-intensity, 1))) rotate(calc(-180deg * var(--anim-intensity, 1))); opacity: 0; } 100% { transform: translateX(0) rotate(0deg); opacity: 1; } }
+        @keyframes animSpinInRight { 0% { transform: translateX(calc(50px * var(--anim-intensity, 1))) rotate(calc(180deg * var(--anim-intensity, 1))); opacity: 0; } 100% { transform: translateX(0) rotate(0deg); opacity: 1; } }
+        @keyframes animPushLeft { 0% { transform: translateX(calc(50px * var(--anim-intensity, 1))); opacity: 0; } 100% { transform: translateX(0); opacity: 1; } }
+        @keyframes animPushRight { 0% { transform: translateX(calc(-50px * var(--anim-intensity, 1))); opacity: 0; } 100% { transform: translateX(0); opacity: 1; } }
+        @keyframes animPushUp { 0% { transform: translateY(calc(50px * var(--anim-intensity, 1))); opacity: 0; } 100% { transform: translateY(0); opacity: 1; } }
+        @keyframes animPushDown { 0% { transform: translateY(calc(-50px * var(--anim-intensity, 1))); opacity: 0; } 100% { transform: translateY(0); opacity: 1; } }
+        @keyframes animRightInsert { 0% { transform: translateX(calc(100% * var(--anim-intensity, 1))); opacity: 0; } 100% { transform: translateX(0); opacity: 1; } }
+        @keyframes animLeftInsert { 0% { transform: translateX(calc(-100% * var(--anim-intensity, 1))); opacity: 0; } 100% { transform: translateX(0); opacity: 1; } }
+        @keyframes animBlurLeft { 0% { filter: blur(calc(10px * var(--anim-intensity, 1))); transform: translateX(calc(-20px * var(--anim-intensity, 1))); opacity: 0; } 100% { filter: blur(0px); transform: translateX(0); opacity: 1; } }
+        @keyframes animBlurRight { 0% { filter: blur(calc(10px * var(--anim-intensity, 1))); transform: translateX(calc(20px * var(--anim-intensity, 1))); opacity: 0; } 100% { filter: blur(0px); transform: translateX(0); opacity: 1; } }
+      `}</style>
 
-        {/* STYLE 1: LINEAR SLANTED BUG BAR */}
-        {layoutStyle === 'style1' && (
-          <div style={{ display: 'flex', flexDirection: 'column', width: 'fit-content', position: 'relative' }}>
-            
-            <div 
-              style={{ 
-                position: 'relative',
-                borderRadius: `${gc.cornerRadius || 8}px`, 
-                boxShadow: '0 8px 16px rgba(0,0,0,0.4)', 
-                transform: `skewX(${skewAngle})`, 
-                width: 'fit-content',
-                boxSizing: 'border-box'
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'stretch' }}>
-                <div style={{ padding: '12px 20px', ...getCompStyle('clock', '#111111', '#ffffff', 32), fontWeight: 'bold' }}>
-                  {renderCompLayers('clock', '#111111')}
-                  <span style={{ position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', transform: getTextSkewTransform('clock'), ...getTextAnimStyle('clock') }}>{formatTime(state.clock_seconds)}</span>
-                </div>
+      <div 
+        id="scoreboard-master-container"
+        style={{
+          backgroundColor: isChromaGreen ? '#00ff00' : 'transparent',
+          minHeight: '100vh', padding: '20px', position: 'relative',
+          // globals.css has a legacy #scoreboard-master-container rule (top/left 40px +
+          // scale) that silently offset the overlay; position is now set from the
+          // Graphics tab instead.
+          top: 0, left: 0, transform: 'none',
+          fontFamily: gc.globalFont || state.global_font || "'Roboto Condensed', sans-serif"
+        }}
+      >
+        <div style={{
+          position: 'absolute',
+          top: `${overlayPosY}px`,
+          left: `calc(50% + ${overlayPosX}px)`,
+          transform: `translateX(-50%) scale(${overlayScale})`,
+          transformOrigin: 'top center',
+          display: 'flex', flexDirection: 'column', alignItems: 'center'
+        }}>
 
-                <div style={{ padding: '12px 15px', ...getCompStyle('period', '#222222', '#ffffff', 24), fontWeight: 'bold' }}>
-                  {renderCompLayers('period', '#222222')}
-                  <span key={`period_${state.period}`} style={{ position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', transform: getTextSkewTransform('period'), ...getTextAnimStyle('period') }}>{state.period}</span>
-                </div>
-                
-                <div id="away-team-box-wrapper" style={{ padding: '12px 28px', ...getCompStyle('awayTeam', state.away_color || '#00468b', '#ffffff', 32), fontWeight: 'bold', flexDirection: 'column', minWidth: '180px', position: 'relative' }}>
-                  {renderCompLayers('awayTeam', state.away_color || '#00468b')}
-                  <span style={{ position: 'relative', zIndex: 3, transform: getTextSkewTransform('awayTeam'), paddingRight: '8px', whiteSpace: 'nowrap', ...getTextAnimStyle('awayTeam') }}>{state.away_name}</span>
-                  <span style={{ fontSize: '11px', background: 'rgba(0,0,0,0.5)', padding: '2px 8px', borderRadius: '10px', marginTop: '2px', position: 'relative', zIndex: 3, transform: getTextSkewTransform('awayTeam') }}>SOG: {state.away_sog}</span>
+          {/* STYLE 1: LINEAR SLANTED BUG BAR */}
+          {layoutStyle === 'style1' && (
+            <div style={{ display: 'flex', flexDirection: 'column', width: 'fit-content', position: 'relative' }}>
+              
+              <div 
+                style={{ 
+                  position: 'relative',
+                  borderRadius: `${gc.cornerRadius || 8}px`, 
+                  boxShadow: '0 8px 16px rgba(0,0,0,0.4)', 
+                  transform: `skewX(${skewAngle})`, 
+                  width: 'fit-content',
+                  boxSizing: 'border-box'
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'stretch' }}>
+                  <div style={{ padding: '12px 20px', ...getCompStyle('clock', '#111111', '#ffffff', 32), fontWeight: 'bold' }}>
+                    {renderCompLayers('clock', '#111111')}
+                    <span style={{ position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', transform: getTextSkewTransform('clock'), ...getTextAnimStyle('clock') }}>{formatTime(state.clock_seconds)}</span>
+                  </div>
+
+                  <div style={{ padding: '12px 15px', ...getCompStyle('period', '#222222', '#ffffff', 24), fontWeight: 'bold' }}>
+                    {renderCompLayers('period', '#222222')}
+                    <span key={`period_${state.period}`} style={{ position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', transform: getTextSkewTransform('period'), ...getTextAnimStyle('period') }}>{state.period}</span>
+                  </div>
                   
-                  {/* FIX: Penalties anchored directly inside team box width */}
-                  {awayPens.length > 0 && (
-                    <div style={{ position: 'absolute', top: '100%', left: 0, width: '100%', marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '4px', zIndex: 10 }}>
-                      {awayPens.map(p => (
-                        <div key={p.id} style={{ background: state.away_color || '#00468b', color: '#fff', padding: '6px 12px', borderRadius: '4px', fontSize: '14px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box' }}>
-                          <span style={{ transform: `skewX(${-parseInt(skewAngle)}deg)` }}>#{p.plyr}</span>
-                          <span style={{ transform: `skewX(${-parseInt(skewAngle)}deg)` }}>{formatTime(p.time)}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
+                  <div id="away-team-box-wrapper" style={{ padding: '12px 28px', ...getCompStyle('awayTeam', state.away_color || '#00468b', '#ffffff', 32), fontWeight: 'bold', flexDirection: 'column', minWidth: '180px', position: 'relative' }}>
+                    {renderCompLayers('awayTeam', state.away_color || '#00468b')}
+                    <span style={{ position: 'relative', zIndex: 3, transform: getTextSkewTransform('awayTeam'), paddingRight: '8px', whiteSpace: 'nowrap', ...getTextAnimStyle('awayTeam') }}>{state.away_name}</span>
+                    <span style={{ fontSize: '11px', background: 'rgba(0,0,0,0.5)', padding: '2px 8px', borderRadius: '10px', marginTop: '2px', position: 'relative', zIndex: 3, transform: getTextSkewTransform('awayTeam') }}>SOG: {state.away_sog}</span>
+                    
+                    {awayPens.length > 0 && (
+                      <div style={{ position: 'absolute', top: '100%', left: 0, width: '100%', marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '4px', zIndex: 10 }}>
+                        {awayPens.map(p => (
+                          <div key={p.id} style={{ background: state.away_color || '#00468b', color: '#fff', padding: '6px 12px', borderRadius: '4px', fontSize: '14px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box' }}>
+                            <span style={{ transform: getTextSkewTransform('awayTeam') }}>#{p.plyr}</span>
+                            <span style={{ transform: getTextSkewTransform('awayTeam') }}>{formatTime(p.time)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
 
-                <div style={{ padding: '12px 20px', ...getCompStyle('awayScore', '#ffffff', '#000000', 36), fontWeight: 'bold', minWidth: '60px' }}>
-                  {renderCompLayers('awayScore', '#ffffff')}
-                  <span key={`awayScore_${state.away_score}`} style={{ position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', transform: getTextSkewTransform('awayScore'), ...getTextAnimStyle('awayScore') }}>{state.away_score}</span>
-                </div>
+                  <div style={{ padding: '12px 20px', ...getCompStyle('awayScore', '#ffffff', '#000000', 36), fontWeight: 'bold', minWidth: '60px' }}>
+                    {renderCompLayers('awayScore', '#ffffff')}
+                    <span key={`awayScore_${state.away_score}`} style={{ position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', transform: getTextSkewTransform('awayScore'), ...getTextAnimStyle('awayScore') }}>{state.away_score}</span>
+                  </div>
 
-                <div id="home-team-box-wrapper" style={{ padding: '12px 28px', ...getCompStyle('homeTeam', state.home_color || '#111111', '#ffffff', 32), fontWeight: 'bold', flexDirection: 'column', minWidth: '180px', position: 'relative' }}>
-                  {renderCompLayers('homeTeam', state.home_color || '#111111')}
-                  <span style={{ position: 'relative', zIndex: 3, transform: getTextSkewTransform('homeTeam'), paddingRight: '8px', whiteSpace: 'nowrap', ...getTextAnimStyle('homeTeam') }}>{state.home_name}</span>
-                  <span style={{ fontSize: '11px', background: 'rgba(0,0,0,0.5)', padding: '2px 8px', borderRadius: '10px', marginTop: '2px', position: 'relative', zIndex: 3, transform: getTextSkewTransform('homeTeam') }}>SOG: {state.home_sog}</span>
+                  <div id="home-team-box-wrapper" style={{ padding: '12px 28px', ...getCompStyle('homeTeam', state.home_color || '#111111', '#ffffff', 32), fontWeight: 'bold', flexDirection: 'column', minWidth: '180px', position: 'relative' }}>
+                    {renderCompLayers('homeTeam', state.home_color || '#111111')}
+                    <span style={{ position: 'relative', zIndex: 3, transform: getTextSkewTransform('homeTeam'), paddingRight: '8px', whiteSpace: 'nowrap', ...getTextAnimStyle('homeTeam') }}>{state.home_name}</span>
+                    <span style={{ fontSize: '11px', background: 'rgba(0,0,0,0.5)', padding: '2px 8px', borderRadius: '10px', marginTop: '2px', position: 'relative', zIndex: 3, transform: getTextSkewTransform('homeTeam') }}>SOG: {state.home_sog}</span>
 
-                  {/* FIX: Penalties anchored directly inside team box width */}
-                  {homePens.length > 0 && (
-                    <div style={{ position: 'absolute', top: '100%', left: 0, width: '100%', marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '4px', zIndex: 10 }}>
-                      {homePens.map(p => (
-                        <div key={p.id} style={{ background: state.home_color || '#111111', color: '#fff', padding: '6px 12px', borderRadius: '4px', fontSize: '14px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box' }}>
-                          <span style={{ transform: `skewX(${-parseInt(skewAngle)}deg)` }}>#{p.plyr}</span>
-                          <span style={{ transform: `skewX(${-parseInt(skewAngle)}deg)` }}>{formatTime(p.time)}</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
+                    {homePens.length > 0 && (
+                      <div style={{ position: 'absolute', top: '100%', left: 0, width: '100%', marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '4px', zIndex: 10 }}>
+                        {homePens.map(p => (
+                          <div key={p.id} style={{ background: state.home_color || '#111111', color: '#fff', padding: '6px 12px', borderRadius: '4px', fontSize: '14px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box' }}>
+                            <span style={{ transform: getTextSkewTransform('homeTeam') }}>#{p.plyr}</span>
+                            <span style={{ transform: getTextSkewTransform('homeTeam') }}>{formatTime(p.time)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
 
-                <div style={{ padding: '12px 20px', ...getCompStyle('homeScore', '#ffffff', '#000000', 36), fontWeight: 'bold', minWidth: '60px' }}>
-                  {renderCompLayers('homeScore', '#ffffff')}
-                  <span key={`homeScore_${state.home_score}`} style={{ position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', transform: getTextSkewTransform('homeScore'), ...getTextAnimStyle('homeScore') }}>{state.home_score}</span>
-                </div>
+                  <div style={{ padding: '12px 20px', ...getCompStyle('homeScore', '#ffffff', '#000000', 36), fontWeight: 'bold', minWidth: '60px' }}>
+                    {renderCompLayers('homeScore', '#ffffff')}
+                    <span key={`homeScore_${state.home_score}`} style={{ position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', transform: getTextSkewTransform('homeScore'), ...getTextAnimStyle('homeScore') }}>{state.home_score}</span>
+                  </div>
 
-                {/* RIGHT PANEL ROLLOUT WRAPPER - Positioned Absolute so it doesn't push the flex center */}
-                {showRightPanel && (
-                  <div style={{ 
-                    position: 'absolute',
-                    left: '100%',
-                    top: 0,
-                    bottom: 0,
-                    zIndex: -1,
-                    display: 'flex',
-                    alignItems: 'stretch',
-                    animation: panelExiting 
-                      ? 'animRolloutRetractToLeft 0.5s cubic-bezier(0.4, 0, 0.2, 1) forwards'
-                      : 'animRolloutShowFromLeft 0.5s cubic-bezier(0.1, 0.9, 0.2, 1) forwards'
-                  }}>
+                  {showRightPanel && (
                     <div style={{ 
-                      padding: '12px 24px', 
-                      ...getCompStyle(activePanelKey, '#ffcc00', '#ffffff', 20),
-                      fontWeight: 'bold', 
-                      minWidth: '160px', 
-                      boxSizing: 'border-box',
-                      borderTopRightRadius: `${gc.cornerRadius || 8}px`,
-                      borderBottomRightRadius: `${gc.cornerRadius || 8}px`
+                      position: 'absolute', left: '100%', top: 0, bottom: 0, zIndex: -1, display: 'flex', alignItems: 'stretch',
+                      animation: panelExiting ? 'animRolloutRetractToLeft 0.5s cubic-bezier(0.4, 0, 0.2, 1) forwards' : 'animRolloutShowFromLeft 0.5s cubic-bezier(0.1, 0.9, 0.2, 1) forwards'
                     }}>
-                      {renderCompLayers(activePanelKey, '#ffcc00', true)}
-                      <span 
-                        key={`rollout_txt_${activePanelKey}_${displayedPanelText}_${state.right_panel_text}`}
-                        style={{ position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', flexShrink: 0, transform: getTextSkewTransform(activePanelKey), ...getTextAnimStyle(activePanelKey) }}
-                      >
-                        {ppActive && `${ppTeam} PP ${ppTimeStr}`}
-                        {isDelayed && 'DELAYED PENALTY'}
-                        {(isRollout || isGoal) && (displayedPanelText || state.right_panel_text)}
-                      </span>
+                      <div style={{ padding: '12px 24px', ...getCompStyle(activePanelKey, '#ffcc00', '#ffffff', 20), fontWeight: 'bold', minWidth: '160px', boxSizing: 'border-box', borderTopRightRadius: `${gc.cornerRadius || 8}px`, borderBottomRightRadius: `${gc.cornerRadius || 8}px` }}>
+                        {renderCompLayers(activePanelKey, '#ffcc00', true)}
+                        {renderPanelText(
+  `rollout_txt_${activePanelKey}_${panelTextKey}`,
+  { position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', flexShrink: 0, transform: getTextSkewTransform(activePanelKey), ...getTextAnimStyle(activePanelKey, panelAnimOverride) },
+  ppActive ? `${ppTeam} PP ${ppTimeStr}` : panelText,
+  ppActive ? [] : panelSizerTexts
+)}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {(displayedBannerActive || bannerExiting) && (
+                  <div style={{ 
+                    position: 'absolute', inset: 0, zIndex: 99999, display: 'flex', alignItems: 'stretch', height: '100%',
+                    animation: bannerExiting ? 'animRolloutRetractToLeft 0.5s cubic-bezier(0.4, 0, 0.2, 1) forwards' : 'animRolloutShowFromLeft 0.5s cubic-bezier(0.1, 0.9, 0.2, 1) forwards'
+                  }}>
+                    <div style={{ ...getCompStyle('banner', '#007bff', '#ffffff', 32), fontWeight: 'bold', textAlign: 'center', width: '100%', height: '100%', border: 'none' }}>
+                      {renderCompLayers('banner', '#007bff')}
+                      <div key={`banner_txt_${bannerTextKey}`} style={{ transform: getTextSkewTransform('banner'), width: '100%', textAlign: 'center', zIndex: 3, whiteSpace: 'nowrap', paddingRight: '8px', ...getTextAnimStyle('banner', bannerAnimOverride) }}>
+                        {bannerText}
+                      </div>
                     </div>
                   </div>
                 )}
               </div>
+              {renderShootoutOverlay()}
+            </div>
+          )}
 
-              {/* PERFECT FULL WIDTH BANNER OVERLAY - Matches Scoreboard EXACTLY */}
-              {(displayedBannerActive || bannerExiting) && (
-                <div 
-                  style={{ 
-                    position: 'absolute', inset: 0, zIndex: 99999,
-                    display: 'flex', alignItems: 'stretch', height: '100%',
-                    animation: bannerExiting 
-                      ? 'animRolloutRetractToLeft 0.5s cubic-bezier(0.4, 0, 0.2, 1) forwards'
-                      : 'animRolloutShowFromLeft 0.5s cubic-bezier(0.1, 0.9, 0.2, 1) forwards'
-                  }}
-                >
-                  <div style={{ ...getCompStyle('banner', '#007bff', '#ffffff', 32), fontWeight: 'bold', textAlign: 'center', width: '100%', height: '100%', border: 'none' }}>
-                    {renderCompLayers('banner', '#007bff')}
-                    <div 
-                      key={`banner_txt_${displayedBannerText}_${state.banner_text}`}
-                      style={{ transform: getTextSkewTransform('banner'), width: '100%', textAlign: 'center', zIndex: 3, whiteSpace: 'nowrap', paddingRight: '8px', ...getTextAnimStyle('banner') }}
-                    >
-                      {displayedBannerText || state.banner_text}
+          {/* STYLE 2: CLASSIC GRID BUG */}
+          {layoutStyle === 'style2' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', width: 'fit-content', position: 'relative' }}>
+              
+              {/* OUTER WRAPPER */}
+              <div 
+                style={{ 
+                  position: 'relative',
+                  borderRadius: `${gc.cornerRadius || 8}px`, 
+                  boxShadow: '0 8px 16px rgba(0,0,0,0.4)', 
+                  width: 'fit-content'
+                }}
+              >
+                
+                {/* INNER GRID */}
+                <div style={{ 
+                  display: 'flex', 
+                  alignItems: 'stretch', 
+                  height: '80px', 
+                  position: 'relative',
+                  border: `${gc.bugBorderWidth || 2}px solid ${gc.bugBorderColor || '#ffffff'}`,
+                  borderRadius: 'inherit',
+                  overflow: 'hidden',
+                  zIndex: 2 
+                }}>
+                  
+                  {/* CLOCK & PERIOD CONTINUOUS COLUMN */}
+                  <div style={{ display: 'flex', flexDirection: 'column', width: '130px', height: '100%', position: 'relative' }}>
+                    <div style={{ position: 'absolute', inset: 0, zIndex: 0 }}>
+                      {renderCompLayers('clock', '#111111')}
+                    </div>
+                    <div style={{ flex: 1, ...getCompStyle('clock', 'transparent', '#ffffff', 28), padding: '0 12px', fontWeight: 'bold' }}>
+                      <span style={{ position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', transform: getTextSkewTransform('clock'), ...getTextAnimStyle('clock') }}>{formatTime(state.clock_seconds)}</span>
+                    </div>
+                    <div style={{ width: '70%', height: `${gc.bugBorderWidth || 2}px`, backgroundColor: 'rgba(255,255,255,0.3)', margin: '0 auto', position: 'relative', zIndex: 3 }} />
+                    <div style={{ flex: 1, ...getCompStyle('period', 'transparent', '#ffffff', 24), padding: '0 12px', fontWeight: 'bold' }}>
+                      <span key={`period_${state.period}`} style={{ position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', transform: getTextSkewTransform('period'), ...getTextAnimStyle('period') }}>{state.period}</span>
                     </div>
                   </div>
-                </div>
-              )}
-            </div>
-            {renderShootoutOverlay()}
-          </div>
-        )}
 
-        {/* STYLE 2: CLASSIC GRID BUG */}
-        {layoutStyle === 'style2' && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', width: 'fit-content', position: 'relative' }}>
-            <div 
-              style={{ 
-                position: 'relative',
-                borderRadius: `${gc.cornerRadius || 8}px`, 
-                boxShadow: '0 8px 16px rgba(0,0,0,0.4)', 
-                border: `${gc.bugBorderWidth || 2}px solid ${gc.bugBorderColor || '#ffffff'}`,
-                width: 'fit-content'
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'stretch', height: '80px', position: 'relative' }}>
-                <div style={{ display: 'flex', flexDirection: 'column', width: '130px', height: '100%' }}>
-                  <div style={{ height: '50%', ...getCompStyle('clock', '#111111', '#ffffff', 28), padding: '0 12px', fontWeight: 'bold' }}>
-                    {renderCompLayers('clock', '#111111')}
-                    <span style={{ position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', transform: getTextSkewTransform('clock'), ...getTextAnimStyle('clock') }}>{formatTime(state.clock_seconds)}</span>
-                  </div>
-                  <div style={{ height: '50%', ...getCompStyle('period', '#ffffff', '#111111', 24), padding: '0 12px', fontWeight: 'bold' }}>
-                    {renderCompLayers('period', '#ffffff')}
-                    <span key={`period_${state.period}`} style={{ position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', transform: getTextSkewTransform('period'), ...getTextAnimStyle('period') }}>{state.period}</span>
-                  </div>
-                </div>
-
-                <div style={{ display: 'flex', flexDirection: 'column', width: '180px', height: '100%', position: 'relative' }}>
-                  <div style={{ height: '50%', ...getCompStyle('awayTeam', state.away_color || '#00468b', '#ffffff', 28), padding: '0 12px', fontWeight: 'bold' }}>
+                  {/* AWAY TEAM */}
+                  <div style={{ width: '180px', height: '100%', ...getCompStyle('awayTeam', state.away_color || '#00468b', '#ffffff', 28), fontWeight: 'bold', padding: '0 12px' }}>
                     {renderCompLayers('awayTeam', state.away_color || '#00468b')}
                     <span style={{ position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', transform: getTextSkewTransform('awayTeam'), ...getTextAnimStyle('awayTeam') }}>{state.away_name}</span>
                   </div>
-                  <div style={{ height: '50%', ...getCompStyle('awaySog', '#ffffff', '#000000', 22), padding: '0 12px', fontWeight: 'bold' }}>
-                    {renderCompLayers('awaySog', '#ffffff')}
-                    <span style={{ position: 'relative', zIndex: 3, paddingRight: '8px' }}>{state.away_sog}</span>
-                  </div>
-                  
-                  {/* FIX: Penalties anchored directly inside team box width */}
-                  {awayPens.length > 0 && (
-                    <div style={{ position: 'absolute', top: '100%', left: 0, width: '100%', marginTop: '4px', display: 'flex', flexDirection: 'column', gap: '4px', zIndex: 10 }}>
-                      {awayPens.map(p => (
-                        <div key={p.id} style={{ background: state.away_color || '#00468b', color: '#fff', padding: '6px 12px', borderRadius: '4px', fontSize: '14px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box' }}>
-                          <span style={{ transform: `skewX(${-parseInt(skewAngle)}deg)` }}>#{p.plyr}</span>
-                          <span style={{ transform: `skewX(${-parseInt(skewAngle)}deg)` }}>{formatTime(p.time)}</span>
-                        </div>
-                      ))}
+
+                  {/* AWAY SCORE & SOG */}
+                  <div style={{ display: 'flex', flexDirection: 'column', width: '70px', height: '100%' }}>
+                    <div style={{ height: '55%', ...getCompStyle('awayScore', '#002855', '#ffffff', 28), padding: '0 8px', fontWeight: 'bold' }}>
+                      {renderCompLayers('awayScore', '#002855')}
+                      <span key={`awayScore_${state.away_score}`} style={{ position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', transform: getTextSkewTransform('awayScore'), ...getTextAnimStyle('awayScore') }}>{state.away_score}</span>
                     </div>
-                  )}
-                </div>
-
-                <div style={{ display: 'flex', flexDirection: 'column', width: '70px', height: '100%' }}>
-                  <div style={{ height: '50%', ...getCompStyle('awayScore', '#002855', '#ffffff', 28), padding: '0 8px', fontWeight: 'bold' }}>
-                    {renderCompLayers('awayScore', '#002855')}
-                    <span key={`awayScore_${state.away_score}`} style={{ position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', transform: getTextSkewTransform('awayScore'), ...getTextAnimStyle('awayScore') }}>{state.away_score}</span>
+                    <div style={{ height: '45%', ...getCompStyle('awaySog', '#dbe2ea', '#1e293b', 18), fontWeight: 'bold' }}>
+                      {renderCompLayers('awaySog', '#dbe2ea')}
+                      <div style={{ position: 'relative', zIndex: 3, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+                        <span style={{ fontSize: '9px', fontWeight: '900', letterSpacing: '0.5px' }}>SOG</span>
+                        <span style={{ transform: getTextSkewTransform('awaySog'), ...getTextAnimStyle('awaySog'), fontSize: '18px', marginTop: '-2px' }}>{state.away_sog}</span>
+                      </div>
+                    </div>
                   </div>
-                  <div style={{ height: '50%', background: '#dbe2ea', color: '#1e293b', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', fontWeight: 'bold', letterSpacing: '0.5px' }}>
-                    SHOTS
-                  </div>
-                </div>
 
-                <div style={{ display: 'flex', flexDirection: 'column', width: '180px', height: '100%', position: 'relative' }}>
-                  <div style={{ height: '50%', ...getCompStyle('homeTeam', state.home_color || '#222222', '#ffffff', 28), padding: '0 12px', fontWeight: 'bold' }}>
+                  {/* HOME TEAM */}
+                  <div style={{ width: '180px', height: '100%', ...getCompStyle('homeTeam', state.home_color || '#222222', '#ffffff', 28), fontWeight: 'bold', padding: '0 12px' }}>
                     {renderCompLayers('homeTeam', state.home_color || '#222222')}
                     <span style={{ position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', transform: getTextSkewTransform('homeTeam'), ...getTextAnimStyle('homeTeam') }}>{state.home_name}</span>
                   </div>
-                  <div style={{ height: '50%', ...getCompStyle('homeSog', '#ffffff', '#000000', 22), padding: '0 12px', fontWeight: 'bold' }}>
-                    {renderCompLayers('homeSog', '#ffffff')}
-                    <span style={{ position: 'relative', zIndex: 3, paddingRight: '8px' }}>{state.home_sog}</span>
-                  </div>
 
-                  {/* FIX: Penalties anchored directly inside team box width */}
-                  {homePens.length > 0 && (
-                    <div style={{ position: 'absolute', top: '100%', left: 0, width: '100%', marginTop: '4px', display: 'flex', flexDirection: 'column', gap: '4px', zIndex: 10 }}>
-                      {homePens.map(p => (
-                        <div key={p.id} style={{ background: state.home_color || '#111111', color: '#fff', padding: '6px 12px', borderRadius: '4px', fontSize: '14px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box' }}>
-                          <span style={{ transform: `skewX(${-parseInt(skewAngle)}deg)` }}>#{p.plyr}</span>
-                          <span style={{ transform: `skewX(${-parseInt(skewAngle)}deg)` }}>{formatTime(p.time)}</span>
-                        </div>
-                      ))}
+                  {/* HOME SCORE & SOG */}
+                  <div style={{ display: 'flex', flexDirection: 'column', width: '70px', height: '100%' }}>
+                    <div style={{ height: '55%', ...getCompStyle('homeScore', '#111111', '#ffffff', 28), padding: '0 8px', fontWeight: 'bold' }}>
+                      {renderCompLayers('homeScore', '#111111')}
+                      <span key={`homeScore_${state.home_score}`} style={{ position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', transform: getTextSkewTransform('homeScore'), ...getTextAnimStyle('homeScore') }}>{state.home_score}</span>
                     </div>
-                  )}
-                </div>
-
-                <div style={{ display: 'flex', flexDirection: 'column', width: '70px', height: '100%' }}>
-                  <div style={{ height: '50%', ...getCompStyle('homeScore', '#111111', '#ffffff', 28), padding: '0 8px', fontWeight: 'bold' }}>
-                    {renderCompLayers('homeScore', '#111111')}
-                    <span key={`homeScore_${state.home_score}`} style={{ position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', transform: getTextSkewTransform('homeScore'), ...getTextAnimStyle('homeScore') }}>{state.home_score}</span>
-                  </div>
-                  <div style={{ height: '50%', background: '#dbe2ea', color: '#1e293b', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', fontWeight: 'bold', letterSpacing: '0.5px' }}>
-                    SHOTS
+                    <div style={{ height: '45%', ...getCompStyle('homeSog', '#dbe2ea', '#1e293b', 18), fontWeight: 'bold' }}>
+                      {renderCompLayers('homeSog', '#dbe2ea')}
+                      <div style={{ position: 'relative', zIndex: 3, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+                        <span style={{ fontSize: '9px', fontWeight: '900', letterSpacing: '0.5px' }}>SOG</span>
+                        <span style={{ transform: getTextSkewTransform('homeSog'), ...getTextAnimStyle('homeSog'), fontSize: '18px', marginTop: '-2px' }}>{state.home_sog}</span>
+                      </div>
+                    </div>
                   </div>
                 </div>
 
+                {/* PENALTIES (Zero-height container removed to prevent GPU culling) */}
+                {(awayPens.length > 0 || homePens.length > 0) && (
+                  <div style={{ position: 'absolute', top: '100%', left: 0, width: '100%', zIndex: 10, marginTop: '4px' }}>
+                    {awayPens.length > 0 && (
+                      <div style={{ position: 'absolute', left: '130px', width: '180px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        {awayPens.map(p => (
+                          <div key={p.id} style={{ background: state.away_color || '#00468b', color: '#fff', padding: '6px 12px', borderRadius: '4px', fontSize: '14px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box' }}>
+                            <span style={{ transform: getTextSkewTransform('awayTeam') }}>#{p.plyr}</span>
+                            <span style={{ transform: getTextSkewTransform('awayTeam') }}>{formatTime(p.time)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {homePens.length > 0 && (
+                      <div style={{ position: 'absolute', left: '380px', width: '180px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                        {homePens.map(p => (
+                          <div key={p.id} style={{ background: state.home_color || '#111111', color: '#fff', padding: '6px 12px', borderRadius: '4px', fontSize: '14px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box' }}>
+                            <span style={{ transform: getTextSkewTransform('homeTeam') }}>#{p.plyr}</span>
+                            <span style={{ transform: getTextSkewTransform('homeTeam') }}>{formatTime(p.time)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* ROLLOUT PANEL */}
                 {showRightPanel && (
                   <div style={{ 
-                    position: 'absolute',
-                    left: '100%',
-                    top: 0,
-                    bottom: 0,
-                    zIndex: -1,
-                    animation: panelExiting 
-                      ? 'animRolloutRetractToLeft 0.5s cubic-bezier(0.4, 0, 0.2, 1) forwards'
-                      : 'animRolloutShowFromLeft 0.5s cubic-bezier(0.1, 0.9, 0.2, 1) forwards'
+                    position: 'absolute', left: '100%', top: 0, bottom: 0, zIndex: 1,
+                    animation: panelExiting ? 'animRolloutRetractToLeft 0.5s cubic-bezier(0.4, 0, 0.2, 1) forwards' : 'animRolloutShowFromLeft 0.5s cubic-bezier(0.1, 0.9, 0.2, 1) forwards'
                   }}>
-                    <div style={{ 
-                      padding: '0 24px', 
-                      ...getCompStyle(activePanelKey, '#ffcc00', '#ffffff', 20),
-                      flexDirection: 'column', 
-                      minWidth: '160px', 
-                      fontWeight: 'bold', 
-                      height: '100%', 
-                      textAlign: 'center',
-                      boxSizing: 'border-box',
-                      borderTopRightRadius: `${gc.cornerRadius || 8}px`,
-                      borderBottomRightRadius: `${gc.cornerRadius || 8}px`
-                    }}>
+                    <div style={{ padding: '0 24px', ...getCompStyle(activePanelKey, '#ffcc00', '#ffffff', 20), flexDirection: 'column', minWidth: '160px', fontWeight: 'bold', height: '100%', textAlign: 'center', boxSizing: 'border-box', borderTopRightRadius: `${gc.cornerRadius || 8}px`, borderBottomRightRadius: `${gc.cornerRadius || 8}px` }}>
                       {renderCompLayers(activePanelKey, '#ffcc00', true)}
                       {ppActive ? (
                         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', position: 'relative', zIndex: 3 }}>
@@ -716,196 +1040,216 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
                         </div>
                       ) : (
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', position: 'relative', zIndex: 3 }}>
-                          <span 
-                            key={`rollout_s2_txt_${activePanelKey}_${displayedPanelText}_${state.right_panel_text}`}
-                            style={{ fontSize: '20px', lineHeight: 1, paddingRight: '8px', whiteSpace: 'nowrap', flexShrink: 0, transform: getTextSkewTransform(activePanelKey), ...getTextAnimStyle(activePanelKey) }}
-                          >
-                            {isDelayed && 'DELAYED PENALTY'}
-                            {(isRollout || isGoal) && (displayedPanelText || state.right_panel_text)}
-                          </span>
+                          {renderPanelText(
+  `rollout_s2_txt_${activePanelKey}_${panelTextKey}`,
+  { fontSize: '20px', lineHeight: 1, paddingRight: '8px', whiteSpace: 'nowrap', flexShrink: 0, transform: getTextSkewTransform(activePanelKey), ...getTextAnimStyle(activePanelKey, panelAnimOverride) },
+  ppActive ? `${ppTeam} PP ${ppTimeStr}` : panelText,
+  ppActive ? [] : panelSizerTexts
+)}
                         </div>
                       )}
                     </div>
                   </div>
                 )}
-              </div>
-              
-              {(displayedBannerActive || bannerExiting) && (
-                <div 
-                  style={{ 
-                    position: 'absolute', inset: 0, zIndex: 99999,
-                    display: 'flex', alignItems: 'stretch', height: '100%',
-                    animation: bannerExiting 
-                      ? 'animRolloutRetractToLeft 0.5s cubic-bezier(0.4, 0, 0.2, 1) forwards'
-                      : 'animRolloutShowFromLeft 0.5s cubic-bezier(0.1, 0.9, 0.2, 1) forwards'
-                  }}
-                >
-                  <div style={{ ...getCompStyle('banner', '#007bff', '#ffffff', 32), fontWeight: 'bold', textAlign: 'center', width: '100%', height: '100%', border: 'none' }}>
-                    {renderCompLayers('banner', '#007bff')}
-                    <div 
-                      key={`banner_txt_${displayedBannerText}_${state.banner_text}`}
-                      style={{ transform: getTextSkewTransform('banner'), width: '100%', textAlign: 'center', zIndex: 3, whiteSpace: 'nowrap', paddingRight: '8px', ...getTextAnimStyle('banner') }}
-                    >
-                      {displayedBannerText || state.banner_text}
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-            {renderShootoutOverlay()}
-          </div>
-        )}
-
-        {/* STYLE 3: COMPACT SPLIT BUG */}
-        {layoutStyle === 'style3' && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', width: 'fit-content', position: 'relative' }}>
-            <div 
-              style={{ 
-                position: 'relative',
-                borderRadius: `${gc.cornerRadius || 8}px`, 
-                boxShadow: '0 8px 16px rgba(0,0,0,0.4)', 
-                border: `${gc.bugBorderWidth || 2}px solid ${gc.bugBorderColor || '#ffffff'}`,
-                width: 'fit-content'
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'stretch', height: '80px', position: 'relative' }}>
-                <div style={{ display: 'flex', flexDirection: 'column', minWidth: '110px', height: '100%' }}>
-                  <div style={{ height: '50%', ...getCompStyle('clock', '#111111', '#ffffff', 28), padding: '0 16px', fontWeight: 'bold' }}>
-                    {renderCompLayers('clock', '#111111')}
-                    <span style={{ position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', transform: getTextSkewTransform('clock'), ...getTextAnimStyle('clock') }}>{formatTime(state.clock_seconds)}</span>
-                  </div>
-                  <div style={{ height: '50%', ...getCompStyle('period', '#ffffff', '#111111', 22), padding: '0 16px', fontWeight: 'bold' }}>
-                    {renderCompLayers('period', '#ffffff')}
-                    <span key={`period_${state.period}`} style={{ position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', transform: getTextSkewTransform('period'), ...getTextAnimStyle('period') }}>{state.period}</span>
-                  </div>
-                </div>
-
-                <div style={{ display: 'flex', flexDirection: 'column', width: '320px', height: '100%', position: 'relative' }}>
-                  <div style={{ display: 'flex', height: '50%', alignItems: 'stretch', position: 'relative' }}>
-                    <div style={{ flex: 1, ...getCompStyle('awayTeam', state.away_color || '#00468b', '#ffffff', 26), padding: '0 16px', justifyContent: 'flex-start' }}>
-                      {renderCompLayers('awayTeam', state.away_color || '#00468b')}
-                      <span style={{ fontWeight: 'bold', position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', transform: getTextSkewTransform('awayTeam'), ...getTextAnimStyle('awayTeam') }}>{state.away_name}</span>
-                    </div>
-                    <div style={{ minWidth: '65px', ...getCompStyle('awayScore', '#002855', '#ffffff', 28), padding: '0 16px' }}>
-                      {renderCompLayers('awayScore', '#002855')}
-                      <span key={`awayScore_${state.away_score}`} style={{ fontWeight: 'bold', position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', transform: getTextSkewTransform('awayScore'), ...getTextAnimStyle('awayScore') }}>{state.away_score}</span>
-                    </div>
-                  </div>
-
-                  <div style={{ display: 'flex', height: '50%', alignItems: 'stretch', position: 'relative' }}>
-                    <div style={{ flex: 1, ...getCompStyle('homeTeam', state.home_color || '#222222', '#ffffff', 26), padding: '0 16px', justifyContent: 'flex-start' }}>
-                      {renderCompLayers('homeTeam', state.home_color || '#222222')}
-                      <span style={{ fontWeight: 'bold', position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', transform: getTextSkewTransform('homeTeam'), ...getTextAnimStyle('homeTeam') }}>{state.home_name}</span>
-                    </div>
-                    <div style={{ minWidth: '65px', ...getCompStyle('homeScore', '#111111', '#ffffff', 28), padding: '0 16px' }}>
-                      {renderCompLayers('homeScore', '#111111')}
-                      <span key={`homeScore_${state.home_score}`} style={{ fontWeight: 'bold', position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', transform: getTextSkewTransform('homeScore'), ...getTextAnimStyle('homeScore') }}>{state.home_score}</span>
-                    </div>
-                  </div>
-
-                  {/* FIX: Penalties anchored directly below the entire 320px column for Style 3 */}
-                  {(awayPens.length > 0 || homePens.length > 0) && (
-                    <div style={{ position: 'absolute', top: '100%', left: 0, width: '100%', display: 'flex', gap: '8px', zIndex: 10, marginTop: '4px' }}>
-                      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                        {awayPens.map(p => (
-                          <div key={p.id} style={{ background: state.away_color || '#00468b', color: '#fff', padding: '6px 12px', borderRadius: '4px', fontSize: '14px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box' }}>
-                            <span style={{ transform: `skewX(${-parseInt(skewAngle)}deg)` }}>#{p.plyr}</span>
-                            <span style={{ transform: `skewX(${-parseInt(skewAngle)}deg)` }}>{formatTime(p.time)}</span>
-                          </div>
-                        ))}
-                      </div>
-                      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                        {homePens.map(p => (
-                          <div key={p.id} style={{ background: state.home_color || '#111111', color: '#fff', padding: '6px 12px', borderRadius: '4px', fontSize: '14px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box' }}>
-                            <span style={{ transform: `skewX(${-parseInt(skewAngle)}deg)` }}>#{p.plyr}</span>
-                            <span style={{ transform: `skewX(${-parseInt(skewAngle)}deg)` }}>{formatTime(p.time)}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                <div style={{ display: 'flex', flexDirection: 'column', minWidth: '60px', position: 'relative', background: '#ffffff', color: '#000', height: '100%' }}>
-                  <div style={{ height: '50%', ...getCompStyle('awaySog', '#ffffff', '#000000', 20), fontWeight: 'bold' }}>
-                    {renderCompLayers('awaySog', '#ffffff')}
-                    <span style={{ position: 'relative', zIndex: 3, paddingRight: '8px' }}>{state.away_sog}</span>
-                  </div>
-                  
-                  <span style={{ 
-                    position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
-                    fontSize: '9px', fontWeight: 'bold', color: '#444', background: '#e2e8f0', 
-                    padding: '2px 5px', borderRadius: '3px', border: '1px solid #cbd5e1', 
-                    boxShadow: '0 2px 4px rgba(0,0,0,0.15)', zIndex: 10, lineHeight: 1
-                  }}>
-                    SOG
-                  </span>
-
-                  <div style={{ height: '50%', ...getCompStyle('homeSog', '#ffffff', '#000000', 20), fontWeight: 'bold' }}>
-                    {renderCompLayers('homeSog', '#ffffff')}
-                    <span style={{ position: 'relative', zIndex: 3, paddingRight: '8px' }}>{state.home_sog}</span>
-                  </div>
-                </div>
-
-                {showRightPanel && (
+                
+                {/* BANNER OVERLAY */}
+                {(displayedBannerActive || bannerExiting) && (
                   <div style={{ 
-                    position: 'absolute',
-                    left: '100%',
-                    top: 0,
-                    bottom: 0,
-                    zIndex: -1,
-                    animation: panelExiting 
-                      ? 'animRolloutRetractToLeft 0.5s cubic-bezier(0.4, 0, 0.2, 1) forwards'
-                      : 'animRolloutShowFromLeft 0.5s cubic-bezier(0.1, 0.9, 0.2, 1) forwards'
+                    position: 'absolute', inset: 0, zIndex: 99999, display: 'flex', alignItems: 'stretch', height: '100%',
+                    animation: bannerExiting ? 'animRolloutRetractToLeft 0.5s cubic-bezier(0.4, 0, 0.2, 1) forwards' : 'animRolloutShowFromLeft 0.5s cubic-bezier(0.1, 0.9, 0.2, 1) forwards'
                   }}>
-                    <div style={{ 
-                      padding: '0 20px', 
-                      ...getCompStyle(activePanelKey, '#ffcc00', '#ffffff', 20),
-                      fontSize: '20px', fontWeight: 'bold', minWidth: '160px', height: '100%', boxSizing: 'border-box',
-                      borderTopRightRadius: `${gc.cornerRadius || 8}px`,
-                      borderBottomRightRadius: `${gc.cornerRadius || 8}px`
-                    }}>
-                      {renderCompLayers(activePanelKey, '#ffcc00', true)}
-                      <span 
-                        key={`rollout_s3_txt_${activePanelKey}_${displayedPanelText}_${state.right_panel_text}`}
-                        style={{ position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', flexShrink: 0, transform: getTextSkewTransform(activePanelKey), ...getTextAnimStyle(activePanelKey) }}
-                      >
-                        {ppActive && `${ppTeam} PP ${ppTimeStr}`}
-                        {isDelayed && 'DELAYED PENALTY'}
-                        {(isRollout || isGoal) && (displayedPanelText || state.right_panel_text)}
-                      </span>
+                    <div style={{ ...getCompStyle('banner', '#007bff', '#ffffff', 32), fontWeight: 'bold', textAlign: 'center', width: '100%', height: '100%' }}>
+                      {renderCompLayers('banner', '#007bff')}
+                      <div key={`banner_txt_${bannerTextKey}`} style={{ transform: getTextSkewTransform('banner'), width: '100%', textAlign: 'center', zIndex: 3, whiteSpace: 'nowrap', paddingRight: '8px', ...getTextAnimStyle('banner', bannerAnimOverride) }}>
+                        {bannerText}
+                      </div>
                     </div>
                   </div>
                 )}
               </div>
+              {renderShootoutOverlay()}
+            </div>
+          )}
 
-              {(displayedBannerActive || bannerExiting) && (
-                <div 
-                  style={{ 
-                    position: 'absolute', inset: 0, zIndex: 99999,
-                    display: 'flex', alignItems: 'stretch', height: '100%',
-                    animation: bannerExiting 
-                      ? 'animRolloutRetractToLeft 0.5s cubic-bezier(0.4, 0, 0.2, 1) forwards'
-                      : 'animRolloutShowFromLeft 0.5s cubic-bezier(0.1, 0.9, 0.2, 1) forwards'
-                  }}
-                >
-                  <div style={{ ...getCompStyle('banner', '#007bff', '#ffffff', 32), fontWeight: 'bold', textAlign: 'center', width: '100%', height: '100%', border: 'none' }}>
-                    {renderCompLayers('banner', '#007bff')}
-                    <div 
-                      key={`banner_txt_${displayedBannerText}_${state.banner_text}`}
-                      style={{ transform: getTextSkewTransform('banner'), width: '100%', textAlign: 'center', zIndex: 3, whiteSpace: 'nowrap', paddingRight: '8px', ...getTextAnimStyle('banner') }}
-                    >
-                      {displayedBannerText || state.banner_text}
+          {/* STYLE 3: COMPACT SPLIT BUG */}
+          {layoutStyle === 'style3' && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', width: 'fit-content', position: 'relative' }}>
+              
+              <div 
+                style={{ 
+                  position: 'relative',
+                  borderRadius: `${gc.cornerRadius || 8}px`, 
+                  boxShadow: '0 8px 16px rgba(0,0,0,0.4)', 
+                  width: 'fit-content'
+                }}
+              >
+                
+                <div style={{ 
+                  display: 'flex', 
+                  alignItems: 'stretch', 
+                  height: '80px', 
+                  position: 'relative',
+                  border: `${gc.bugBorderWidth || 2}px solid ${gc.bugBorderColor || '#ffffff'}`,
+                  borderRadius: 'inherit',
+                  overflow: 'hidden',
+                  zIndex: 2
+                }}>
+                  
+                  <div style={{ display: 'flex', flexDirection: 'column', width: '110px', height: '100%', position: 'relative' }}>
+                    <div style={{ position: 'absolute', inset: 0, zIndex: 0 }}>
+                      {renderCompLayers('clock', '#111111')}
+                    </div>
+                    <div style={{ flex: 1, ...getCompStyle('clock', 'transparent', '#ffffff', 28), padding: '0 16px', fontWeight: 'bold' }}>
+                      <span style={{ position: 'relative', zIndex: 3, whiteSpace: 'nowrap', transform: getTextSkewTransform('clock'), ...getTextAnimStyle('clock') }}>{formatTime(state.clock_seconds)}</span>
+                    </div>
+                    <div style={{ width: '70%', height: `${gc.bugBorderWidth || 2}px`, backgroundColor: 'rgba(255,255,255,0.3)', margin: '0 auto', position: 'relative', zIndex: 3 }} />
+                    <div style={{ flex: 1, ...getCompStyle('period', 'transparent', '#ffffff', 22), padding: '0 16px', fontWeight: 'bold' }}>
+                      <span key={`period_${state.period}`} style={{ position: 'relative', zIndex: 3, whiteSpace: 'nowrap', transform: getTextSkewTransform('period'), ...getTextAnimStyle('period') }}>{state.period}</span>
                     </div>
                   </div>
-                </div>
-              )}
-            </div>
-            {renderShootoutOverlay()}
-          </div>
-        )}
 
+                  <div style={{ display: 'flex', flexDirection: 'column', width: '192px', height: '100%', position: 'relative' }}>
+                    
+                    <div style={{ display: 'flex', height: '50%', alignItems: 'stretch', position: 'relative' }}>
+                      <div style={{ flex: 1, ...getCompStyle('awayTeam', state.away_color || '#00468b', '#ffffff', 26), padding: '0 12px', justifyContent: 'flex-start', overflow: 'hidden' }}>
+                        {renderCompLayers('awayTeam', state.away_color || '#00468b')}
+                        <span style={{ fontWeight: 'bold', position: 'relative', zIndex: 3, whiteSpace: 'nowrap', transform: getTextSkewTransform('awayTeam'), ...getTextAnimStyle('awayTeam') }}>{state.away_name}</span>
+                      </div>
+                      <div style={{ minWidth: '50px', ...getCompStyle('awayScore', '#002855', '#ffffff', 28), padding: '0 8px' }}>
+                        {renderCompLayers('awayScore', '#002855')}
+                        <span key={`awayScore_${state.away_score}`} style={{ fontWeight: 'bold', position: 'relative', zIndex: 3, whiteSpace: 'nowrap', transform: getTextSkewTransform('awayScore'), ...getTextAnimStyle('awayScore') }}>{state.away_score}</span>
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'flex', height: '50%', alignItems: 'stretch', position: 'relative' }}>
+                      <div style={{ flex: 1, ...getCompStyle('homeTeam', state.home_color || '#222222', '#ffffff', 26), padding: '0 12px', justifyContent: 'flex-start', overflow: 'hidden' }}>
+                        {renderCompLayers('homeTeam', state.home_color || '#222222')}
+                        <span style={{ fontWeight: 'bold', position: 'relative', zIndex: 3, whiteSpace: 'nowrap', transform: getTextSkewTransform('homeTeam'), ...getTextAnimStyle('homeTeam') }}>{state.home_name}</span>
+                      </div>
+                      <div style={{ minWidth: '50px', ...getCompStyle('homeScore', '#111111', '#ffffff', 28), padding: '0 8px' }}>
+                        {renderCompLayers('homeScore', '#111111')}
+                        <span key={`homeScore_${state.home_score}`} style={{ fontWeight: 'bold', position: 'relative', zIndex: 3, whiteSpace: 'nowrap', transform: getTextSkewTransform('homeScore'), ...getTextAnimStyle('homeScore') }}>{state.home_score}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', minWidth: '60px', height: '100%', position: 'relative' }}>
+                    
+                    <div style={{ height: '50%', ...getCompStyle('awaySog', '#ffffff', '#000000', 20), fontWeight: 'bold' }}>
+                      {renderCompLayers('awaySog', '#ffffff')}
+                      <span style={{ position: 'relative', zIndex: 3, transform: getTextSkewTransform('awaySog'), ...getTextAnimStyle('awaySog') }}>
+                        {state.away_sog}
+                      </span>
+                    </div>
+
+                    <div style={{ height: '50%', ...getCompStyle('homeSog', '#ffffff', '#000000', 20), fontWeight: 'bold' }}>
+                      {renderCompLayers('homeSog', '#ffffff')}
+                      <span style={{ position: 'relative', zIndex: 3, transform: getTextSkewTransform('homeSog'), ...getTextAnimStyle('homeSog') }}>
+                        {state.home_sog}
+                      </span>
+                    </div>
+                    
+                    <span style={{ 
+                      position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
+                      fontSize: '9px', fontWeight: '900', color: '#444', background: '#e2e8f0', 
+                      padding: '2px 5px', borderRadius: '3px', border: '1px solid #cbd5e1', 
+                      boxShadow: '0 2px 4px rgba(0,0,0,0.15)', zIndex: 20, lineHeight: 1, letterSpacing: '0.5px'
+                    }}>
+                      SOG
+                    </span>
+
+                  </div>
+
+                </div>
+
+                {(awayPens.length > 0 || homePens.length > 0) && (
+                  <div style={{ position: 'absolute', top: '100%', left: '110px', width: '192px', display: 'flex', gap: '8px', zIndex: 10, marginTop: '4px' }}>
+                    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      {awayPens.map(p => (
+                        <div key={p.id} style={{ background: state.away_color || '#00468b', color: '#fff', padding: '6px 8px', borderRadius: '4px', fontSize: '12px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box' }}>
+                          <span style={{ transform: getTextSkewTransform('awayTeam') }}>#{p.plyr}</span>
+                          <span style={{ transform: getTextSkewTransform('awayTeam') }}>{formatTime(p.time)}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      {homePens.map(p => (
+                        <div key={p.id} style={{ background: state.home_color || '#111111', color: '#fff', padding: '6px 8px', borderRadius: '4px', fontSize: '12px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box' }}>
+                          <span style={{ transform: getTextSkewTransform('homeTeam') }}>#{p.plyr}</span>
+                          <span style={{ transform: getTextSkewTransform('homeTeam') }}>{formatTime(p.time)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* ROLLOUT PANEL */}
+                {showRightPanel && (
+                  <div style={{ 
+                    position: 'absolute', left: '100%', top: 0, bottom: 0, zIndex: 1,
+                    animation: panelExiting ? 'animRolloutRetractToLeft 0.5s cubic-bezier(0.4, 0, 0.2, 1) forwards' : 'animRolloutShowFromLeft 0.5s cubic-bezier(0.1, 0.9, 0.2, 1) forwards'
+                  }}>
+                    <div style={{ padding: '0 20px', ...getCompStyle(activePanelKey, '#ffcc00', '#ffffff', 20), fontSize: '20px', fontWeight: 'bold', minWidth: '160px', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', boxSizing: 'border-box', borderTopRightRadius: `${gc.cornerRadius || 8}px`, borderBottomRightRadius: `${gc.cornerRadius || 8}px` }}>
+                      {renderCompLayers(activePanelKey, '#ffcc00', true)}
+                      {renderPanelText(
+  `rollout_s3_txt_${activePanelKey}_${panelTextKey}`,
+  { position: 'relative', zIndex: 3, whiteSpace: 'nowrap', flexShrink: 0, transform: getTextSkewTransform(activePanelKey), ...getTextAnimStyle(activePanelKey, panelAnimOverride) },
+  ppActive ? `${ppTeam} PP ${ppTimeStr}` : panelText,
+  ppActive ? [] : panelSizerTexts
+)}
+                    </div>
+                  </div>
+                )}
+                
+                {/* BANNER OVERLAY */}
+                {(displayedBannerActive || bannerExiting) && (
+                  <div style={{ 
+                    position: 'absolute', inset: 0, zIndex: 99999, display: 'flex', alignItems: 'stretch', height: '100%',
+                    animation: bannerExiting ? 'animRolloutRetractToLeft 0.5s cubic-bezier(0.4, 0, 0.2, 1) forwards' : 'animRolloutShowFromLeft 0.5s cubic-bezier(0.1, 0.9, 0.2, 1) forwards'
+                  }}>
+                    <div style={{ ...getCompStyle('banner', '#007bff', '#ffffff', 32), fontWeight: 'bold', textAlign: 'center', width: '100%', height: '100%', border: 'none' }}>
+                      {renderCompLayers('banner', '#007bff')}
+                      <div key={`banner_txt_${bannerTextKey}`} style={{ transform: getTextSkewTransform('banner'), width: '100%', textAlign: 'center', zIndex: 3, whiteSpace: 'nowrap', ...getTextAnimStyle('banner', bannerAnimOverride) }}>
+                        {bannerText}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+              {renderShootoutOverlay()}
+            </div>
+          )}
+
+          {/* MEDIA PRELOADER: images via <link>, videos via hidden buffered <video>
+              elements (Chrome/OBS ignore <link rel="preload" as="video">). */}
+          <div aria-hidden style={{ position: 'fixed', width: 1, height: 1, overflow: 'hidden', opacity: 0, pointerEvents: 'none', left: -10, top: -10 }}>
+            {Array.from(new Map(
+              ['awayGoal', 'homeGoal', 'goal', 'ppPanel', 'delayedPenalty', 'rollout1', 'rollout2', 'rollout3', 'banner', 'awayTeam', 'homeTeam', 'clock', 'period']
+                .map(key => resolveMedia(gc, key))
+                .filter(m => m.url)
+                .map(m => [m.url, m] as const)
+            ).values()).map(({ url, isVid }) => isVid ? (
+              <video
+                key={`preload_${url}`}
+                src={url}
+                preload="auto"
+                muted
+                playsInline
+                ref={el => {
+                  if (el) preloadVideosRef.current.set(url, el);
+                  else preloadVideosRef.current.delete(url);
+                }}
+              />
+            ) : (
+              <link key={`preload_${url}`} rel="preload" href={url} as="image" />
+            ))}
+          </div>
+
+        </div>
       </div>
-    </div>
+
+      {/* Intensity-specific keyframes collected during this render */}
+      <style>{Array.from(dynKeyframes.values()).join('\n')}</style>
+    </>
   );
 }

@@ -6,6 +6,22 @@ import { supabase } from '@/lib/supabase';
 interface Penalty { id: number; team: string; plyr: string; time: number; }
 interface ShootoutRound { away: number; home: number; }
 
+// One text in a rollout's text sequence. Item 0 is always the main "Rollout N Text" field.
+// anim / animDur left blank = use the rollout component's own Text Animation settings.
+interface RolloutSeqItem { id: string; text: string; dur: string; anim: string; animDur: string; }
+
+const TEXT_ANIM_OPTIONS: [string, string][] = [
+  ['none', 'None (Static)'], ['wipeLeft', 'Wipe Left'], ['wipeRight', 'Wipe Right'], ['wipeUp', 'Wipe Up'],
+  ['wipeDown', 'Wipe Down'], ['fadeIn', 'Fade In'], ['fadeOut', 'Fade Out'], ['zoomIn', 'Zoom In'],
+  ['zoomOut', 'Zoom Out'], ['typewriter', 'Typewriter (Centered)'], ['glitchTypewriter', 'Glitch Typewriter'],
+  ['spinInLeft', 'Spin In Left'], ['spinInRight', 'Spin In Right'], ['pushLeft', 'Push Left'],
+  ['pushRight', 'Push Right'], ['pushUp', 'Push Up'], ['pushDown', 'Push Down'], ['randomFlash', 'Random Flash'],
+  ['enlarge', 'Enlarge'], ['rightInsert', 'Right Insert'], ['leftInsert', 'Left Insert'],
+  ['blurLeft', 'Blur Left'], ['blurRight', 'Blur Right'],
+];
+
+const newSeqId = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+
 const DEFAULT_HOTKEYS: Record<string, string> = {
   toggleClock: 'Space', resetClock: '', addMin: '', subMin: '', addSec: '', subSec: '',
   resetAllStats: '', clearPenalties: '', triggerRollout1: 'Digit1', triggerRollout2: 'Digit2',
@@ -39,9 +55,14 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
   const localChannelRef = useRef<BroadcastChannel | null>(null);
   const debounceTimer = useRef<NodeJS.Timeout | null>(null);
   const rolloutTimerRef = useRef<NodeJS.Timeout | null>(null);
+  // Monotonic sequence stamped on every broadcast so the overlay can discard
+  // late / out-of-order messages (local BroadcastChannel vs Supabase vs DB echo).
+  const broadcastSeqRef = useRef<number>(0);
+  // Which text field's sequence dropdown is open (its seq key), or null.
+  const [openSeqEditor, setOpenSeqEditor] = useState<string | null>(null);
   const bannerTimerRef = useRef<NodeJS.Timeout | null>(null);
   
-  const handleKeyDownRef = useRef<(e: KeyboardEvent) => void>();
+  const handleKeyDownRef = useRef<((e: KeyboardEvent) => void) | null>(null);
 
   useEffect(() => {
     params.then(p => setId(p.id));
@@ -66,14 +87,19 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
   }, [id]);
 
   const broadcastState = async (updatedState: any) => {
+    // Date.now()-based so a reloaded control panel still outranks older messages
+    const seq = Math.max(Date.now(), broadcastSeqRef.current + 1);
+    broadcastSeqRef.current = seq;
+    const stamped = { ...updatedState, _seq: seq };
+
     if (localChannelRef.current) {
-      localChannelRef.current.postMessage(updatedState);
+      localChannelRef.current.postMessage(stamped);
     }
     if (channelRef.current) {
       await channelRef.current.send({
         type: 'broadcast',
         event: 'STATE_UPDATE',
-        payload: updatedState,
+        payload: stamped,
       });
     }
   };
@@ -127,7 +153,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
       stateRef.current = updated;
       setState(updated);
       broadcastState(updated);
-      supabase.from('scoreboards').update({ graphics_config: targetConfig, clock_seconds: currentState.clock_seconds }).eq('id', id).then();
+      supabase.from('scoreboards').update({ graphics_config: targetConfig, clock_seconds: currentState.clock_seconds, penalties: currentState.penalties }).eq('id', id).then();
     }
   };
 
@@ -145,7 +171,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
       stateRef.current = updated;
       setState(updated);
       broadcastState(updated);
-      supabase.from('scoreboards').update({ graphics_config: targetConfig, clock_seconds: currentState.clock_seconds }).eq('id', id).then();
+      supabase.from('scoreboards').update({ graphics_config: targetConfig, clock_seconds: currentState.clock_seconds, penalties: currentState.penalties }).eq('id', id).then();
     }
   };
 
@@ -205,6 +231,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     return () => clearInterval(interval);
   }, [state?.clock_running, id]);
 
+  // SAFELY MERGES PENALTIES TO PREVENT COLLISION
   const updateField = async (field: string, value: any) => {
     const currentState = stateRef.current;
     if (!currentState) return;
@@ -213,7 +240,17 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     stateRef.current = updated;
     setState(updated);
     broadcastState(updated);
-    supabase.from('scoreboards').update({ [field]: value, clock_seconds: currentState.clock_seconds }).eq('id', id).then();
+    
+    const payload: Record<string, any> = { 
+      [field]: value, 
+      clock_seconds: currentState.clock_seconds 
+    };
+    
+    if (field !== 'penalties') {
+      payload.penalties = currentState.penalties;
+    }
+    
+    supabase.from('scoreboards').update(payload).eq('id', id).then();
   };
 
   const resetStats = (type: 'away' | 'home' | 'all') => {
@@ -239,7 +276,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     stateRef.current = updated;
     setState(updated);
     broadcastState(updated);
-    supabase.from('scoreboards').update({ ...payload, clock_seconds: currentState.clock_seconds }).eq('id', id).then();
+    supabase.from('scoreboards').update({ ...payload, clock_seconds: currentState.clock_seconds, penalties: currentState.penalties }).eq('id', id).then();
   };
 
   const adjClock = async (seconds: number) => {
@@ -251,7 +288,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     stateRef.current = updated;
     setState(updated);
     broadcastState(updated);
-    supabase.from('scoreboards').update({ clock_seconds: newSeconds }).eq('id', id).then();
+    supabase.from('scoreboards').update({ clock_seconds: newSeconds, penalties: currentState.penalties }).eq('id', id).then();
   };
 
   const toggleClock = async () => {
@@ -263,7 +300,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     stateRef.current = updated;
     setState(updated);
     broadcastState(updated);
-    supabase.from('scoreboards').update({ clock_running: newRunningState, clock_seconds: currentState.clock_seconds }).eq('id', id).then();
+    supabase.from('scoreboards').update({ clock_running: newRunningState, clock_seconds: currentState.clock_seconds, penalties: currentState.penalties }).eq('id', id).then();
   };
 
   const resetClock = () => {
@@ -275,7 +312,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     stateRef.current = updated;
     setState(updated);
     broadcastState(updated);
-    supabase.from('scoreboards').update({ clock_running: false, clock_seconds: totalSecs }).eq('id', id).then();
+    supabase.from('scoreboards').update({ clock_running: false, clock_seconds: totalSecs, penalties: currentState.penalties }).eq('id', id).then();
   };
 
   const handlePeriodChange = async (newPeriod: string) => {
@@ -295,7 +332,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     supabase.from('scoreboards').update({ 
       period: newPeriod,
       clock_running: false, 
-      clock_seconds: totalSecs 
+      clock_seconds: totalSecs,
+      penalties: currentState.penalties
     }).eq('id', id).then();
   };
 
@@ -333,12 +371,32 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     if (debounceTimer.current) clearTimeout(debounceTimer.current);
 
     if (immediate) {
-      supabase.from('scoreboards').update({ graphics_config: newConfig, clock_seconds: currentState.clock_seconds }).eq('id', id).then();
+      supabase.from('scoreboards').update({ graphics_config: newConfig, clock_seconds: currentState.clock_seconds, penalties: currentState.penalties }).eq('id', id).then();
     } else {
       debounceTimer.current = setTimeout(() => {
-        supabase.from('scoreboards').update({ graphics_config: newConfig, clock_seconds: currentState.clock_seconds }).eq('id', id).then();
+        supabase.from('scoreboards').update({ graphics_config: newConfig, clock_seconds: currentState.clock_seconds, penalties: currentState.penalties }).eq('id', id).then();
       }, 200);
     }
+  };
+
+  // Same as updateGraphicVar but writes several keys as one change / one history step.
+  const updateGraphicVars = async (patch: Record<string, any>, immediate = false, skipHistory = false) => {
+    const currentState = stateRef.current;
+    if (!currentState) return;
+
+    const newConfig = { ...(currentState.graphics_config || {}), ...patch };
+    const updated = { ...currentState, graphics_config: newConfig };
+
+    stateRef.current = updated;
+    setState(updated);
+    broadcastState(updated);
+
+    if (!skipHistory) pushHistory(newConfig);
+
+    if (debounceTimer.current) clearTimeout(debounceTimer.current);
+    const write = () => supabase.from('scoreboards').update({ graphics_config: newConfig, clock_seconds: currentState.clock_seconds, penalties: currentState.penalties }).eq('id', id).then();
+    if (immediate) write();
+    else debounceTimer.current = setTimeout(write, 200);
   };
 
   const getGVar = (key: string, fallback: any = '') => {
@@ -409,7 +467,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
       away_color: newAwayColor,
       home_color: newHomeColor,
       graphics_config: newConfig,
-      clock_seconds: currentState.clock_seconds 
+      clock_seconds: currentState.clock_seconds,
+      penalties: currentState.penalties
     }).eq('id', id).then();
 
     alert(`Pasted settings onto [${selectedComp}]!`);
@@ -471,7 +530,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     
     const updatePayload: Record<string, any> = { 
       [field]: newVal,
-      clock_seconds: currentState.clock_seconds 
+      clock_seconds: currentState.clock_seconds,
+      penalties: currentState.penalties
     };
 
     const isAutoRolloutEnabled = getRefGVar('auto_goal_rollout', true);
@@ -488,7 +548,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
       }
 
       const durationVal = parseInt(getRefGVar(`${mode}_duration`, '5'));
-      const duration = isNaN(durationVal) ? 5 : durationVal;
+      const duration = isNaN(durationVal) || durationVal < 1 ? 5 : durationVal;
 
       const isAutoHide = getRefGVar(`${mode}_autohide`, true);
       const shouldAutoHide = isAutoHide === true || isAutoHide === 'true';
@@ -521,13 +581,30 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     }
 
     const durationVal = parseInt(getRefGVar(`${modeName}_duration`, '5'));
-    const duration = isNaN(durationVal) ? 5 : durationVal;
+    const duration = isNaN(durationVal) || durationVal < 1 ? 5 : durationVal;
 
     const isAutoHide = getRefGVar(`${modeName}_autohide`, true);
     const shouldAutoHide = isAutoHide === true || isAutoHide === 'true';
 
-    updateField('right_panel_mode', modeName);
-    updateField('right_panel_text', textValue);
+    const currentState = stateRef.current;
+    if (!currentState) return;
+
+    const updated = { 
+      ...currentState, 
+      right_panel_mode: modeName, 
+      right_panel_text: textValue 
+    };
+
+    stateRef.current = updated;
+    setState(updated);
+    broadcastState(updated);
+    
+    supabase.from('scoreboards').update({ 
+      right_panel_mode: modeName, 
+      right_panel_text: textValue, 
+      clock_seconds: currentState.clock_seconds,
+      penalties: currentState.penalties
+    }).eq('id', id).then();
 
     if (modeName !== 'none' && shouldAutoHide) {
       rolloutTimerRef.current = setTimeout(() => {
@@ -560,7 +637,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
       if (rolloutTimerRef.current) clearTimeout(rolloutTimerRef.current);
       updateField('right_panel_mode', 'none');
     } else {
-      triggerRolloutWithAutoHide(newMode, 'DELAYED PENALTY');
+      triggerRolloutWithAutoHide(newMode, getRefGVar('delayedPenalty_text', 'DELAYED PENALTY'));
     }
   };
 
@@ -577,13 +654,27 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     const txt = getRefGVar('banner_text', "FULL WIDTH BANNER");
     
     const durationVal = parseInt(getRefGVar('banner_duration', '5'));
-    const duration = isNaN(durationVal) ? 5 : durationVal;
+    const duration = isNaN(durationVal) || durationVal < 1 ? 5 : durationVal;
     
     const isAutoHide = getRefGVar('banner_autohide', true);
     const shouldAutoHide = isAutoHide === true || isAutoHide === 'true';
 
-    updateField('banner_active', isActive);
-    updateField('banner_text', txt);
+    const updated = {
+      ...currentState,
+      banner_active: isActive,
+      banner_text: txt
+    };
+
+    stateRef.current = updated;
+    setState(updated);
+    broadcastState(updated);
+    
+    supabase.from('scoreboards').update({ 
+      banner_active: isActive, 
+      banner_text: txt, 
+      clock_seconds: currentState.clock_seconds,
+      penalties: currentState.penalties
+    }).eq('id', id).then();
 
     if (isActive && shouldAutoHide) {
       bannerTimerRef.current = setTimeout(() => {
@@ -740,7 +831,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
         setState(updated);
         await broadcastState(updated);
         pushHistory(newConfig);
-        await supabase.from('scoreboards').update({ graphics_config: newConfig, clock_seconds: currentState.clock_seconds }).eq('id', id);
+        await supabase.from('scoreboards').update({ graphics_config: newConfig, clock_seconds: currentState.clock_seconds, penalties: currentState.penalties }).eq('id', id);
       }
 
     } catch (err) {
@@ -766,7 +857,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     setState(updated);
     await broadcastState(updated);
     pushHistory(newConfig);
-    await supabase.from('scoreboards').update({ graphics_config: newConfig, clock_seconds: currentState.clock_seconds }).eq('id', id);
+    await supabase.from('scoreboards').update({ graphics_config: newConfig, clock_seconds: currentState.clock_seconds, penalties: currentState.penalties }).eq('id', id);
   };
 
   const selectExportFolder = async () => {
@@ -952,6 +1043,191 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
   };
 
   const isRolloutElement = ['rollout1', 'rollout2', 'rollout3', 'awayGoal', 'homeGoal', 'delayedPenalty', 'banner'].includes(selectedComp);
+
+  // ---------- Text sequences (rollouts, goals, delayed penalty, banner) ----------
+  // Every rollout-style text field can hold a sequence of texts. The sequence is
+  // stored at graphics_config[`${seqKey}_seq`]; item 0's text is mirrored into the
+  // field's original key (textKey) so triggers and older overlays keep working.
+  interface SeqFieldDef {
+    seqKey: string;        // storage prefix + overlay lookup key
+    label: string;
+    textKey: string;       // original single-text key
+    defaultText: string;
+    durationKeys: string[]; // auto-hide duration key(s) for MATCH DURATION
+    displayName: string;
+    hint?: string;
+  }
+
+  const SEQ_FIELDS: SeqFieldDef[] = [
+    { seqKey: 'goal', label: 'Goal Rollout Format:', textKey: 'goal_text_format', defaultText: 'GOAL {TEAM}', durationKeys: ['awayGoal_duration', 'homeGoal_duration'], displayName: 'the Away / Home Goal rollout', hint: 'Shared by Away and Home goals. {TEAM} is replaced with the scoring team name in any text.' },
+    { seqKey: 'rollout1', label: 'Rollout 1 Text:', textKey: 'rollout1_text', defaultText: 'ROLLOUT 1', durationKeys: ['rollout1_duration'], displayName: 'Rollout 1' },
+    { seqKey: 'rollout2', label: 'Rollout 2 Text:', textKey: 'rollout2_text', defaultText: 'ROLLOUT 2', durationKeys: ['rollout2_duration'], displayName: 'Rollout 2' },
+    { seqKey: 'rollout3', label: 'Rollout 3 Text:', textKey: 'rollout3_text', defaultText: 'ROLLOUT 3', durationKeys: ['rollout3_duration'], displayName: 'Rollout 3' },
+    { seqKey: 'delayedPenalty', label: 'Delayed Penalty Text:', textKey: 'delayedPenalty_text', defaultText: 'DELAYED PENALTY', durationKeys: ['delayedPenalty_duration'], displayName: 'the Delayed Penalty rollout' },
+    { seqKey: 'banner', label: 'Banner Text:', textKey: 'banner_text', defaultText: 'FULL WIDTH BANNER', durationKeys: ['banner_duration'], displayName: 'the Banner' },
+  ];
+
+  const getTextSeq = (f: SeqFieldDef): RolloutSeqItem[] => {
+    const mainText = getGVar(f.textKey, f.defaultText);
+    const raw = getGVar(`${f.seqKey}_seq`, null);
+    if (Array.isArray(raw) && raw.length > 0) {
+      return raw.map((it: any, i: number) => ({
+        id: it?.id || `s${i}`,
+        text: i === 0 ? mainText : String(it?.text ?? ''),
+        dur: String(it?.dur ?? '3'),
+        anim: String(it?.anim ?? ''),
+        animDur: String(it?.animDur ?? ''),
+      }));
+    }
+    return [{ id: 's0', text: mainText, dur: '3', anim: '', animDur: '' }];
+  };
+
+  const saveTextSeq = (f: SeqFieldDef, items: RolloutSeqItem[], immediate = true) => {
+    updateGraphicVars({ [`${f.seqKey}_seq`]: items, [f.textKey]: items[0]?.text ?? '' }, immediate);
+  };
+
+  const renderSeqTextField = (f: SeqFieldDef) => {
+    const items = getTextSeq(f);
+    const hasStoredSeq = Array.isArray(getGVar(`${f.seqKey}_seq`, null));
+    const isOpen = openSeqEditor === f.seqKey;
+    const loopVal = getGVar(`${f.seqKey}_seq_loop`, true);
+    const isLoop = loopVal === true || loopVal === 'true';
+    const total = items.reduce((sum, it) => sum + (parseFloat(it.dur) || 0), 0);
+
+    const patchItem = (idx: number, patch: Partial<RolloutSeqItem>, immediate = true) =>
+      saveTextSeq(f, items.map((it, i) => (i === idx ? { ...it, ...patch } : it)), immediate);
+    const moveItem = (idx: number, dir: -1 | 1) => {
+      const to = idx + dir;
+      if (to < 0 || to >= items.length) return;
+      const next = [...items];
+      [next[idx], next[to]] = [next[to], next[idx]];
+      saveTextSeq(f, next);
+    };
+    const removeItem = (idx: number) => {
+      if (items.length <= 1) return;
+      saveTextSeq(f, items.filter((_, i) => i !== idx));
+    };
+    const addItem = () =>
+      saveTextSeq(f, [...items, { id: newSeqId(), text: '', dur: '3', anim: '', animDur: '' }]);
+    const matchDuration = () => {
+      const secs = String(Math.max(1, Math.ceil(total)));
+      updateGraphicVars(Object.fromEntries(f.durationKeys.map(k => [k, secs])), true);
+    };
+
+    const smallInput: React.CSSProperties = { width: '52px', flex: 'none', textAlign: 'center', padding: '6px 4px' };
+    const iconBtn: React.CSSProperties = {
+      flex: 'none', width: '28px', height: '30px', padding: 0, cursor: 'pointer', borderRadius: '4px',
+      background: themeVars.btnSecondaryBg, color: themeVars.btnSecondaryText, border: `1px solid ${themeVars.btnSecondaryBorder}`,
+    };
+
+    return (
+      <div key={`seq_text_field_${f.seqKey}`} style={{ marginBottom: '10px' }}>
+        <div className="row" style={{ marginBottom: isOpen ? '6px' : undefined }}>
+          <label>{f.label}</label>
+          <input
+            type="text"
+            value={items[0].text}
+            placeholder={f.seqKey === 'goal' ? 'e.g. GOAL {TEAM}' : undefined}
+            onChange={(e) => {
+              if (hasStoredSeq) patchItem(0, { text: e.target.value });
+              else updateGraphicVar(f.textKey, e.target.value, true);
+            }}
+          />
+          <button
+            type="button"
+            title="Text sequence: multiple texts with their own duration and effect"
+            onClick={() => setOpenSeqEditor(isOpen ? null : f.seqKey)}
+            style={{ ...iconBtn, width: 'auto', padding: '0 8px', whiteSpace: 'nowrap', fontWeight: 'bold', fontSize: '11px',
+              background: items.length > 1 ? '#007bff' : iconBtn.background, color: items.length > 1 ? '#fff' : iconBtn.color }}
+          >
+            {items.length > 1 ? `${items.length} ` : ''}{isOpen ? '▴' : '▾'}
+          </button>
+        </div>
+
+        {isOpen && (
+          <div style={{ border: `1px solid ${themeVars.borderCol}`, borderRadius: '6px', padding: '10px', background: themeVars.bgInput }}>
+            <div style={{ fontSize: '11px', color: themeVars.textMuted, marginBottom: '8px' }}>
+              Texts play in order while {f.displayName} is on screen. Effect "Component default" uses the text animation set in the Component Editor.
+              {f.hint ? <><br />{f.hint}</> : null}
+            </div>
+
+            <div style={{ display: 'flex', gap: '6px', fontSize: '10px', fontWeight: 'bold', color: themeVars.textMuted, padding: '0 0 4px 26px', textTransform: 'uppercase' }}>
+              <span style={{ flex: 1 }}>Text</span>
+              <span style={{ width: '52px', textAlign: 'center' }}>Show (s)</span>
+              <span style={{ width: '130px' }}>Effect</span>
+              <span style={{ width: '52px', textAlign: 'center' }}>Speed (s)</span>
+              <span style={{ width: '94px' }} />
+            </div>
+
+            {items.map((it, idx) => (
+              <div key={it.id} style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '6px' }}>
+                <span style={{ width: '20px', flex: 'none', fontSize: '11px', fontWeight: 'bold', color: themeVars.textMuted, textAlign: 'right' }}>{idx + 1}</span>
+                <input
+                  type="text"
+                  value={it.text}
+                  placeholder={`Text ${idx + 1}`}
+                  onChange={(e) => patchItem(idx, { text: e.target.value }, idx === 0)}
+                  style={{ flex: 1, minWidth: 0, padding: '6px' }}
+                />
+                <input
+                  type="number" min="0.5" step="0.5"
+                  value={it.dur}
+                  title="How long this text stays up before the next one"
+                  onChange={(e) => patchItem(idx, { dur: e.target.value })}
+                  style={smallInput}
+                />
+                <select
+                  value={it.anim}
+                  onChange={(e) => patchItem(idx, { anim: e.target.value })}
+                  style={{ ...selectStyle, width: '130px', flex: 'none', padding: '6px 4px' }}
+                >
+                  <option value="" style={selectStyle}>Component default</option>
+                  {TEXT_ANIM_OPTIONS.map(([v, label]) => (
+                    <option key={v} value={v} style={selectStyle}>{label}</option>
+                  ))}
+                </select>
+                <input
+                  type="number" min="0.1" step="0.1"
+                  value={it.animDur}
+                  placeholder="def"
+                  title="Animation speed in seconds (blank = component default)"
+                  onChange={(e) => patchItem(idx, { animDur: e.target.value })}
+                  style={smallInput}
+                />
+                <button type="button" title="Move up" onClick={() => moveItem(idx, -1)} disabled={idx === 0} style={{ ...iconBtn, opacity: idx === 0 ? 0.4 : 1 }}>↑</button>
+                <button type="button" title="Move down" onClick={() => moveItem(idx, 1)} disabled={idx === items.length - 1} style={{ ...iconBtn, opacity: idx === items.length - 1 ? 0.4 : 1 }}>↓</button>
+                <button type="button" title="Remove" onClick={() => removeItem(idx)} disabled={items.length <= 1} style={{ ...iconBtn, opacity: items.length <= 1 ? 0.4 : 1, color: '#ff6b6b' }}>✕</button>
+              </div>
+            ))}
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', marginTop: '8px' }}>
+              <button type="button" className="btn bg-blue" style={{ flex: 'none', padding: '8px 12px' }} onClick={addItem}>+ ADD TEXT</button>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '6px', width: 'auto', fontSize: '12px', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={isLoop}
+                  onChange={(e) => updateGraphicVar(`${f.seqKey}_seq_loop`, e.target.checked, true)}
+                />
+                Loop sequence
+              </label>
+              <span style={{ fontSize: '12px', color: themeVars.textMuted, marginLeft: 'auto' }}>
+                Total: {Math.round(total * 10) / 10}s · Shows for {getGVar(f.durationKeys[0], '5')}s
+              </span>
+              <button
+                type="button"
+                className="btn"
+                style={{ flex: 'none', padding: '8px 12px' }}
+                title="Set the auto-hide duration so the whole sequence plays once"
+                onClick={matchDuration}
+              >
+                MATCH DURATION
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   const renderHotkeyRow = (label: string, actionKey: string) => {
     const currentVal = hotkeysConfig[actionKey] || '';
@@ -1521,14 +1797,76 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             </div>
 
             <div className="row">
-              <label>Global Scale:</label>
-              <input 
-                type="range" min="0.5" max="1.5" step="0.05" 
-                value={getGVar('bugScale', '1.0')} 
-                onChange={(e) => updateGraphicVar('bugScale', e.target.value, false, true)} 
-                onMouseUp={() => pushHistory(stateRef.current?.graphics_config)}
-                onTouchEnd={() => pushHistory(stateRef.current?.graphics_config)}
-              />
+              <label>Overlay Scale:</label>
+              <div className="sync-group">
+                <input 
+                  type="range" min="0.25" max="3" step="0.05" 
+                  value={getGVar('bugScale', '1.0')} 
+                  onChange={(e) => updateGraphicVar('bugScale', e.target.value, false, true)} 
+                  onMouseUp={() => pushHistory(stateRef.current?.graphics_config)}
+                  onTouchEnd={() => pushHistory(stateRef.current?.graphics_config)}
+                />
+                <input 
+                  type="number" className="sync-num" step="0.05" min="0.1" max="4"
+                  value={getGVar('bugScale', '1.0')} 
+                  onChange={(e) => updateGraphicVar('bugScale', e.target.value)} 
+                  style={{ width: '55px' }}
+                />
+              </div>
+            </div>
+
+            <div className="row">
+              <label>Position X (px):</label>
+              <div className="sync-group">
+                <input 
+                  type="range" min="-960" max="960" step="1" 
+                  value={getGVar('overlayPosX', '0')} 
+                  onChange={(e) => updateGraphicVar('overlayPosX', e.target.value, false, true)} 
+                  onMouseUp={() => pushHistory(stateRef.current?.graphics_config)}
+                  onTouchEnd={() => pushHistory(stateRef.current?.graphics_config)}
+                />
+                <input 
+                  type="number" className="sync-num" step="1"
+                  value={getGVar('overlayPosX', '0')} 
+                  onChange={(e) => updateGraphicVar('overlayPosX', e.target.value)} 
+                  style={{ width: '55px' }}
+                />
+              </div>
+            </div>
+
+            <div className="row">
+              <label>Position Y (px):</label>
+              <div className="sync-group">
+                <input 
+                  type="range" min="0" max="1080" step="1" 
+                  value={getGVar('overlayPosY', '20')} 
+                  onChange={(e) => updateGraphicVar('overlayPosY', e.target.value, false, true)} 
+                  onMouseUp={() => pushHistory(stateRef.current?.graphics_config)}
+                  onTouchEnd={() => pushHistory(stateRef.current?.graphics_config)}
+                />
+                <input 
+                  type="number" className="sync-num" step="1"
+                  value={getGVar('overlayPosY', '20')} 
+                  onChange={(e) => updateGraphicVar('overlayPosY', e.target.value)} 
+                  style={{ width: '55px' }}
+                />
+              </div>
+            </div>
+
+            <div className="row">
+              <button
+                className="btn"
+                style={{ borderRadius: '6px' }}
+                onClick={() => {
+                  const cfg = { ...(stateRef.current?.graphics_config || {}), bugScale: '1.0', overlayPosX: '0', overlayPosY: '20' };
+                  updateGraphicVar('bugScale', '1.0', false, true);
+                  updateGraphicVar('overlayPosX', '0', false, true);
+                  updateGraphicVar('overlayPosY', '20', true, true);
+                  pushHistory(cfg);
+                }}
+              >
+                RESET POSITION &amp; SCALE
+              </button>
             </div>
 
             <div className="row">
@@ -1595,51 +1933,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
 
             <hr style={{ borderColor: themeVars.borderCol, margin: '15px 0' }} />
 
-            <div className="row">
-              <label>Goal Rollout Format:</label>
-              <input 
-                type="text" 
-                value={getGVar('goal_text_format', 'GOAL {TEAM}')} 
-                onChange={(e) => updateGraphicVar('goal_text_format', e.target.value, true)} 
-                placeholder="e.g. GOAL {TEAM}"
-              />
-            </div>
-
-            <div className="row">
-              <label>Rollout 1 Text:</label>
-              <input 
-                type="text" 
-                value={getGVar('rollout1_text', 'ROLLOUT 1')} 
-                onChange={(e) => updateGraphicVar('rollout1_text', e.target.value, true)} 
-              />
-            </div>
-
-            <div className="row">
-              <label>Rollout 2 Text:</label>
-              <input 
-                type="text" 
-                value={getGVar('rollout2_text', 'ROLLOUT 2')} 
-                onChange={(e) => updateGraphicVar('rollout2_text', e.target.value, true)} 
-              />
-            </div>
-
-            <div className="row">
-              <label>Rollout 3 Text:</label>
-              <input 
-                type="text" 
-                value={getGVar('rollout3_text', 'ROLLOUT 3')} 
-                onChange={(e) => updateGraphicVar('rollout3_text', e.target.value, true)} 
-              />
-            </div>
-
-            <div className="row">
-              <label>Banner Text:</label>
-              <input 
-                type="text" 
-                value={getGVar('banner_text', 'FULL WIDTH BANNER')} 
-                onChange={(e) => updateGraphicVar('banner_text', e.target.value, true)} 
-              />
-            </div>
+            {SEQ_FIELDS.map(f => renderSeqTextField(f))}
           </div>
 
           <div className="box" style={{ flex: '2 1 600px', borderColor: '#007bff' }}>
@@ -1882,24 +2176,45 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                 </div>
 
                 {getGVar(`${selectedComp}_text_anim`, 'none') !== 'none' && (
-                  <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
-                    <label>Anim Duration (s):</label>
-                    <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                      <input 
-                        type="range" min="0.2" max="3.0" step="0.1" 
-                        value={getGVar(`${selectedComp}_text_anim_dur`, '0.6')} 
-                        onChange={(e) => updateGraphicVar(`${selectedComp}_text_anim_dur`, e.target.value, false, true)} 
-                        onMouseUp={() => pushHistory(stateRef.current?.graphics_config)}
-                        onTouchEnd={() => pushHistory(stateRef.current?.graphics_config)}
-                      />
-                      <input 
-                        type="number" className="sync-num" step="0.1"
-                        value={getGVar(`${selectedComp}_text_anim_dur`, '0.6')} 
-                        onChange={(e) => updateGraphicVar(`${selectedComp}_text_anim_dur`, e.target.value)} 
-                        style={{ width: '55px', height: '32px', textAlign: 'center' }}
-                      />
+                  <>
+                    <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+                      <label>Anim Duration (s):</label>
+                      <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <input 
+                          type="range" min="0.2" max="3.0" step="0.1" 
+                          value={getGVar(`${selectedComp}_text_anim_dur`, '0.6')} 
+                          onChange={(e) => updateGraphicVar(`${selectedComp}_text_anim_dur`, e.target.value, false, true)} 
+                          onMouseUp={() => pushHistory(stateRef.current?.graphics_config)}
+                          onTouchEnd={() => pushHistory(stateRef.current?.graphics_config)}
+                        />
+                        <input 
+                          type="number" className="sync-num" step="0.1"
+                          value={getGVar(`${selectedComp}_text_anim_dur`, '0.6')} 
+                          onChange={(e) => updateGraphicVar(`${selectedComp}_text_anim_dur`, e.target.value)} 
+                          style={{ width: '55px', height: '32px', textAlign: 'center' }}
+                        />
+                      </div>
                     </div>
-                  </div>
+
+                    <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+                      <label>Anim Intensity (Scale):</label>
+                      <div className="sync-group" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <input 
+                          type="range" min="0.1" max="5.0" step="0.1" 
+                          value={getGVar(`${selectedComp}_text_anim_intensity`, '1.0')} 
+                          onChange={(e) => updateGraphicVar(`${selectedComp}_text_anim_intensity`, e.target.value, false, true)} 
+                          onMouseUp={() => pushHistory(stateRef.current?.graphics_config)}
+                          onTouchEnd={() => pushHistory(stateRef.current?.graphics_config)}
+                        />
+                        <input 
+                          type="number" className="sync-num" step="0.1"
+                          value={getGVar(`${selectedComp}_text_anim_intensity`, '1.0')} 
+                          onChange={(e) => updateGraphicVar(`${selectedComp}_text_anim_intensity`, e.target.value)} 
+                          style={{ width: '55px', height: '32px', textAlign: 'center' }}
+                        />
+                      </div>
+                    </div>
+                  </>
                 )}
 
                 <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
@@ -1930,7 +2245,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                       type="checkbox" 
                       checked={getGVar(`${selectedComp}_text_global_skew`, false)} 
                       onChange={(e) => updateGraphicVar(`${selectedComp}_text_global_skew`, e.target.checked, true)} 
-                      style={{ flex: 'none' }} 
+                      style={{ flex: 'none', width: 'auto' }} 
                     /> 
                     <span style={{ fontSize: '11px' }}>Use Global Box Angle ({globalSkewVal}°)</span>
                   </div>
