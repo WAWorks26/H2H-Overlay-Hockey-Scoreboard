@@ -1064,6 +1064,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     { seqKey: 'rollout2', label: 'Rollout 2 Text:', textKey: 'rollout2_text', defaultText: 'ROLLOUT 2', durationKeys: ['rollout2_duration'], displayName: 'Rollout 2' },
     { seqKey: 'rollout3', label: 'Rollout 3 Text:', textKey: 'rollout3_text', defaultText: 'ROLLOUT 3', durationKeys: ['rollout3_duration'], displayName: 'Rollout 3' },
     { seqKey: 'delayedPenalty', label: 'Delayed Penalty Text:', textKey: 'delayedPenalty_text', defaultText: 'DELAYED PENALTY', durationKeys: ['delayedPenalty_duration'], displayName: 'the Delayed Penalty rollout' },
+    { seqKey: 'ppPanel', label: 'Power Play Text:', textKey: 'ppPanel_text', defaultText: '{TEAM} PP {TIME}', durationKeys: [], displayName: 'the Power Play panel', hint: 'Placeholders: {TEAM} = team on the power play, {TIME} = PP time remaining (live), {SITUATION} = e.g. 5 VS 4. The PP panel stays up for the whole power play.' },
     { seqKey: 'banner', label: 'Banner Text:', textKey: 'banner_text', defaultText: 'FULL WIDTH BANNER', durationKeys: ['banner_duration'], displayName: 'the Banner' },
   ];
 
@@ -1127,7 +1128,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
           <input
             type="text"
             value={items[0].text}
-            placeholder={f.seqKey === 'goal' ? 'e.g. GOAL {TEAM}' : undefined}
+            placeholder={f.seqKey === 'goal' ? 'e.g. GOAL {TEAM}' : f.seqKey === 'ppPanel' ? 'e.g. {TEAM} PP {TIME}' : undefined}
             onChange={(e) => {
               if (hasStoredSeq) patchItem(0, { text: e.target.value });
               else updateGraphicVar(f.textKey, e.target.value, true);
@@ -1211,17 +1212,19 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                 Loop sequence
               </label>
               <span style={{ fontSize: '12px', color: themeVars.textMuted, marginLeft: 'auto' }}>
-                Total: {Math.round(total * 10) / 10}s · Shows for {getGVar(f.durationKeys[0], '5')}s
+                Total: {Math.round(total * 10) / 10}s{f.durationKeys.length > 0 ? ` · Shows for ${getGVar(f.durationKeys[0], '5')}s` : ''}
               </span>
-              <button
-                type="button"
-                className="btn"
-                style={{ flex: 'none', padding: '8px 12px' }}
-                title="Set the auto-hide duration so the whole sequence plays once"
-                onClick={matchDuration}
-              >
-                MATCH DURATION
-              </button>
+              {f.durationKeys.length > 0 && (
+                <button
+                  type="button"
+                  className="btn"
+                  style={{ flex: 'none', padding: '8px 12px' }}
+                  title="Set the auto-hide duration so the whole sequence plays once"
+                  onClick={matchDuration}
+                >
+                  MATCH DURATION
+                </button>
+              )}
             </div>
           </div>
         )}
@@ -2602,6 +2605,21 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                     <button className="btn btn-secondary-theme" onClick={clearMedia}>CLEAR MEDIA</button>
                   </div>
                 </div>
+
+                {selectedComp === 'ppPanel' && (
+                  <div className="row" style={{ marginTop: '10px' }}>
+                    <label>Team Logo BG:</label>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <input
+                        type="checkbox"
+                        checked={getGVar('ppPanel_use_team_media', true) !== false && getGVar('ppPanel_use_team_media', true) !== 'false'}
+                        onChange={(e) => updateGraphicVar('ppPanel_use_team_media', e.target.checked, true)}
+                        style={{ flex: 'none', width: 'auto' }}
+                      />
+                      <span style={{ fontSize: '11px' }}>Use the team box logo/video of the team on the power play (overrides the media above when that team has one)</span>
+                    </div>
+                  </div>
+                )}
 
                 {currentIsVideo && (
                   <div className="row" style={{ marginTop: '10px' }}>

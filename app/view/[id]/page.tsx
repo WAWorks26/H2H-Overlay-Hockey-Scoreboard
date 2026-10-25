@@ -82,6 +82,52 @@ function useTextSequence(items: RolloutSeqItem[], loop: boolean, activeKey: stri
   };
 }
 
+// ---------- Media cache ----------
+// Every background image/video is downloaded ONCE, in full, into memory (blob URL)
+// and into the browser's persistent Cache Storage. After that, playback never touches
+// the network: no buffering on a weak rink connection, and an OBS restart reloads
+// the media from disk instead of downloading it again.
+const MEDIA_CACHE_NAME = 'h2h-media-v1';
+const MEDIA_KEYS = ['awayGoal', 'homeGoal', 'goal', 'ppPanel', 'delayedPenalty', 'rollout1', 'rollout2', 'rollout3', 'banner', 'awayTeam', 'homeTeam', 'clock', 'period'];
+const blobUrlCache = new Map<string, string>();          // remote URL -> blob: URL
+const blobLoads = new Map<string, Promise<string>>();    // in-flight downloads
+
+const loadMediaBlob = (url: string): Promise<string> => {
+  if (!url || url.startsWith('blob:') || url.startsWith('data:')) return Promise.resolve(url);
+  const ready = blobUrlCache.get(url);
+  if (ready) return Promise.resolve(ready);
+  const pending = blobLoads.get(url);
+  if (pending) return pending;
+
+  const p = (async () => {
+    try {
+      let res: Response | undefined;
+      let cache: Cache | undefined;
+      if (typeof caches !== 'undefined') {
+        try {
+          cache = await caches.open(MEDIA_CACHE_NAME);
+          res = await cache.match(url);
+        } catch { /* Cache Storage unavailable (e.g. private mode) - memory only */ }
+      }
+      if (!res) {
+        const net = await fetch(url, { mode: 'cors', cache: 'force-cache' });
+        if (!net.ok) throw new Error(`HTTP ${net.status}`);
+        if (cache) { try { await cache.put(url, net.clone()); } catch { /* quota etc. */ } }
+        res = net;
+      }
+      const blobUrl = URL.createObjectURL(await res.blob());
+      blobUrlCache.set(url, blobUrl);
+      return blobUrl;
+    } catch (err) {
+      console.warn('[overlay] media cache failed, streaming from network instead:', url, err);
+      blobLoads.delete(url); // allow a retry later
+      return url;
+    }
+  })();
+  blobLoads.set(url, p);
+  return p;
+};
+
 // Longest we will hold back a rollout / banner while its background video buffers.
 const MEDIA_WAIT_MS = 250;
 
@@ -134,14 +180,61 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
   const waitForMedia = (gcfg: Record<string, any>, key: string): Promise<void> => {
     const { url, isVid } = resolveMedia(gcfg || {}, key);
     if (!url || !isVid) return Promise.resolve();
-    const vid = preloadVideosRef.current.get(url);
-    if (!vid || vid.readyState >= 3) return Promise.resolve();
+    if (blobUrlCache.has(url)) {
+      const vid = preloadVideosRef.current.get(url);
+      if (!vid || vid.readyState >= 3) return Promise.resolve();
+    }
+    // Wait for the cached copy (and its decoder) - never longer than MEDIA_WAIT_MS
     return new Promise(resolve => {
-      const done = () => { clearTimeout(t); vid.removeEventListener('canplay', done); resolve(); };
-      const t = setTimeout(done, MEDIA_WAIT_MS);
-      vid.addEventListener('canplay', done);
+      let finished = false;
+      const finish = () => { if (finished) return; finished = true; clearTimeout(t); resolve(); };
+      const t = setTimeout(finish, MEDIA_WAIT_MS);
+      loadMediaBlob(url).then(() => {
+        const vid = preloadVideosRef.current.get(url);
+        if (!vid || vid.readyState >= 3) return finish();
+        const onReady = () => { vid.removeEventListener('canplay', onReady); finish(); };
+        vid.addEventListener('canplay', onReady);
+      });
     });
   };
+
+  // Blob URLs for downloaded media (state so components re-render onto the local copy)
+  const [blobUrls, setBlobUrls] = useState<Record<string, string>>({});
+  const mediaUrlsKey = Array.from(new Set(
+    MEDIA_KEYS.map(k => resolveMedia(state?.graphics_config || {}, k).url).filter(Boolean)
+  )).join('|');
+
+  useEffect(() => {
+    const urls = mediaUrlsKey ? mediaUrlsKey.split('|') : [];
+    let cancelled = false;
+
+    const run = () => urls.forEach(u => {
+      loadMediaBlob(u).then(local => {
+        if (!cancelled && local !== u) setBlobUrls(prev => (prev[u] === local ? prev : { ...prev, [u]: local }));
+      });
+    });
+    run();
+
+    // Retry anything that failed (e.g. Wi-Fi dropped) every 15 s
+    const retry = setInterval(() => {
+      if (urls.some(u => !blobUrlCache.has(u))) run();
+    }, 15000);
+
+    // Drop cached files this scoreboard no longer uses (replaced uploads)
+    if (id && state?.graphics_config && typeof caches !== 'undefined') {
+      caches.open(MEDIA_CACHE_NAME)
+        .then(c => c.keys().then(reqs => reqs.forEach(r => {
+          if (r.url.includes(`/${id}/`) && !urls.includes(r.url)) c.delete(r);
+        })))
+        .catch(() => {});
+    }
+
+    return () => { cancelled = true; clearInterval(retry); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mediaUrlsKey, id]);
+
+  // Local copy if downloaded, otherwise the network URL
+  const mediaSrc = (u: string) => blobUrls[u] || blobUrlCache.get(u) || u;
 
   useEffect(() => {
     params.then(p => setId(p.id));
@@ -318,6 +411,19 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
   const panelSeqItems = resolveSeq(gcLive, panelSeqKey, goalTeam);
   const panelSeq = useTextSequence(panelSeqItems, isSeqLoop(gcLive, panelSeqKey), panelSeqKey ? displayedPanelMode : '');
 
+  // Power play side ('away' | 'home' | '') computed here too, because hooks must run
+  // before the early return below.
+  const ppSideLive = (() => {
+    if (!state || displayedPanelMode !== 'none') return '';
+    const pens = state.penalties || [];
+    const a = pens.filter((p: any) => p.team === 'away').length;
+    const h = pens.filter((p: any) => p.team === 'home').length;
+    if (a === h) return '';
+    return h > a ? 'away' : 'home';
+  })();
+  const ppSeqItemsRaw = ppSideLive ? resolveSeq(gcLive, 'ppPanel') : [];
+  const ppSeq = useTextSequence(ppSeqItemsRaw, isSeqLoop(gcLive, 'ppPanel'), ppSideLive ? `pp_${ppSideLive}` : '');
+
   const bannerSeqItems = displayedBannerActive ? resolveSeq(gcLive, 'banner') : [];
   const bannerSeq = useTextSequence(bannerSeqItems, isSeqLoop(gcLive, 'banner'), displayedBannerActive ? 'banner' : '');
 
@@ -332,11 +438,13 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
   let ppTeam = '';
   let ppTimeStr = '';
   let ppSituationStr = '';
+  let ppSide: '' | 'away' | 'home' = '';
   
   if (displayedPanelMode === 'none' && (awayPens.length > 0 || homePens.length > 0)) {
     if (awayPens.length !== homePens.length) {
       ppActive = true;
       const isAwayPP = homePens.length > awayPens.length;
+      ppSide = isAwayPP ? 'away' : 'home';
       ppTeam = isAwayPP ? state.away_name : state.home_name;
       const lowestTime = isAwayPP ? Math.min(...homePens.map(p=>p.time)) : Math.min(...awayPens.map(p=>p.time));
       ppTimeStr = formatTime(lowestTime);
@@ -377,11 +485,32 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
     : `${displayedBannerText}_${state.banner_text}`;
   const bannerAnimOverride = activeBannerItem ? { anim: activeBannerItem.anim, dur: activeBannerItem.animDur } : undefined;
 
+  // Power play text: sequence / custom text with {TEAM} {TIME} {SITUATION} filled in live.
+  // With no custom text configured, the original PP layouts are used unchanged.
+  const fillPP = (t: string) =>
+    String(t).replace(/{TEAM}/g, ppTeam || '').replace(/{TIME}/g, ppTimeStr).replace(/{SITUATION}/g, ppSituationStr);
+  const ppCustomText = gc.ppPanel_text;
+  const ppItems: RolloutSeqItem[] = ppSeqItemsRaw.length > 0
+    ? ppSeqItemsRaw
+    : (ppCustomText && String(ppCustomText).trim() !== '' ? [{ text: String(ppCustomText) }] : []);
+  const ppCustom = ppActive && ppItems.length > 0;
+  const activePPItem = ppCustom ? ppItems[Math.min(ppSeq.index, ppItems.length - 1)] : null;
+  const ppText = activePPItem ? fillPP(activePPItem.text) : `${ppTeam} PP ${ppTimeStr}`;
+
+  // What the side panel actually shows (PP or rollout/goal/delayed)
+  const sideText = ppActive ? ppText : panelText;
+  // PP key excludes the ticking time so the animation doesn't replay every second
+  const sideTextKey = ppActive ? `pp_${ppSide}_${ppSeq.index}_${ppSeq.cycle}` : panelTextKey;
+  const sideAnimOverride = ppActive
+    ? (activePPItem ? { anim: activePPItem.anim, dur: activePPItem.animDur } : undefined)
+    : panelAnimOverride;
+  const sideSizerTexts = ppActive ? (ppCustom ? ppItems.map(it => fillPP(it.text)) : []) : panelSizerTexts;
+
   // Side-panel text in a grid cell: invisible copies of every possible text share the
   // cell with the visible (animated) one, so the panel is as wide as the longest
   // text and holds that width while shorter texts play.
   const renderPanelText = (spanKey: string, spanStyle: React.CSSProperties, content: React.ReactNode, sizers: string[]) => (
-    <span style={{ display: 'inline-grid', position: 'relative', zIndex: 3, flexShrink: 0, alignItems: 'center' }}>
+    <span style={{ display: 'inline-grid', position: 'relative', zIndex: 3, flexShrink: 0, alignItems: 'center', ...(ppActive ? { fontVariantNumeric: 'tabular-nums' } : {}) }}>
       {sizers.map((t, i) => (
         <span
           key={`sz_${i}`}
@@ -404,6 +533,27 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
     isRollout ? currentMode : 'rollout1';
 
   const getCompVar = (compKey: string, propSuffix: string, fallback: any = undefined) => {
+    // Power play panel: use the PP team's team-box logo/video as its background
+    // (on by default; toggle in Component Editor > Power Play). The PP panel's own
+    // scale / alpha / position still win if set, so the logo can be framed for the panel.
+    if (compKey === 'ppPanel' && ppSide) {
+      const useTeam = gc.ppPanel_use_team_media !== false && gc.ppPanel_use_team_media !== 'false';
+      const team = ppSide === 'away' ? 'awayTeam' : 'homeTeam';
+      const teamUrl = gc[`${team}_media_url`];
+      if (useTeam && teamUrl) {
+        if (['media_url', 'is_video', 'media_loop'].includes(propSuffix)) {
+          const v = gc[`${team}_${propSuffix}`];
+          return v !== undefined && v !== '' ? v : fallback;
+        }
+        if (['img_alpha', 'img_scale', 'img_x', 'img_y', 'use_global_skew'].includes(propSuffix)) {
+          const own = gc[`ppPanel_${propSuffix}`];
+          if (own !== undefined && own !== '') return own;
+          const v = gc[`${team}_${propSuffix}`];
+          return v !== undefined && v !== '' ? v : fallback;
+        }
+      }
+    }
+
     const directVal = gc[`${compKey}_${propSuffix}`];
     if (directVal !== undefined && directVal !== '') return directVal;
 
@@ -565,7 +715,7 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
               {isVid ? (
                 <video 
                   key={`vid_${url}`} 
-                  src={url}
+                  src={mediaSrc(url)}
                   autoPlay loop={isLoop} muted playsInline preload="auto"
                   style={{
                     width: '100%', height: '100%', objectFit: 'contain', pointerEvents: 'none',
@@ -576,7 +726,7 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
               ) : (
                 <img 
                   key={`img_${url}`}
-                  src={url} alt="Background Media" 
+                  src={mediaSrc(url)} alt="Background Media" 
                   style={{
                     width: '100%', height: '100%', objectFit: 'contain', pointerEvents: 'none',
                     opacity: imgAlpha, transformOrigin: 'center',
@@ -888,10 +1038,10 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
                       <div style={{ padding: '12px 24px', ...getCompStyle(activePanelKey, '#ffcc00', '#ffffff', 20), fontWeight: 'bold', minWidth: '160px', boxSizing: 'border-box', borderTopRightRadius: `${gc.cornerRadius || 8}px`, borderBottomRightRadius: `${gc.cornerRadius || 8}px` }}>
                         {renderCompLayers(activePanelKey, '#ffcc00', true)}
                         {renderPanelText(
-  `rollout_txt_${activePanelKey}_${panelTextKey}`,
-  { position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', flexShrink: 0, transform: getTextSkewTransform(activePanelKey), ...getTextAnimStyle(activePanelKey, panelAnimOverride) },
-  ppActive ? `${ppTeam} PP ${ppTimeStr}` : panelText,
-  ppActive ? [] : panelSizerTexts
+  `rollout_txt_${activePanelKey}_${sideTextKey}`,
+  { position: 'relative', zIndex: 3, paddingRight: '8px', whiteSpace: 'nowrap', flexShrink: 0, transform: getTextSkewTransform(activePanelKey), ...getTextAnimStyle(activePanelKey, sideAnimOverride) },
+  sideText,
+  sideSizerTexts
 )}
                       </div>
                     </div>
@@ -1033,7 +1183,7 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
                   }}>
                     <div style={{ padding: '0 24px', ...getCompStyle(activePanelKey, '#ffcc00', '#ffffff', 20), flexDirection: 'column', minWidth: '160px', fontWeight: 'bold', height: '100%', textAlign: 'center', boxSizing: 'border-box', borderTopRightRadius: `${gc.cornerRadius || 8}px`, borderBottomRightRadius: `${gc.cornerRadius || 8}px` }}>
                       {renderCompLayers(activePanelKey, '#ffcc00', true)}
-                      {ppActive ? (
+                      {ppActive && !ppCustom ? (
                         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', position: 'relative', zIndex: 3 }}>
                           <span style={{ fontSize: '12px', textTransform: 'uppercase', marginBottom: '2px', lineHeight: 1 }}>{ppSituationStr || `${ppTeam} PP`}</span>
                           <span style={{ fontSize: '30px', lineHeight: 1 }}>{ppTimeStr}</span>
@@ -1041,10 +1191,10 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
                       ) : (
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', position: 'relative', zIndex: 3 }}>
                           {renderPanelText(
-  `rollout_s2_txt_${activePanelKey}_${panelTextKey}`,
-  { fontSize: '20px', lineHeight: 1, paddingRight: '8px', whiteSpace: 'nowrap', flexShrink: 0, transform: getTextSkewTransform(activePanelKey), ...getTextAnimStyle(activePanelKey, panelAnimOverride) },
-  ppActive ? `${ppTeam} PP ${ppTimeStr}` : panelText,
-  ppActive ? [] : panelSizerTexts
+  `rollout_s2_txt_${activePanelKey}_${sideTextKey}`,
+  { fontSize: '20px', lineHeight: 1, paddingRight: '8px', whiteSpace: 'nowrap', flexShrink: 0, transform: getTextSkewTransform(activePanelKey), ...getTextAnimStyle(activePanelKey, sideAnimOverride) },
+  sideText,
+  sideSizerTexts
 )}
                         </div>
                       )}
@@ -1192,10 +1342,10 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
                     <div style={{ padding: '0 20px', ...getCompStyle(activePanelKey, '#ffcc00', '#ffffff', 20), fontSize: '20px', fontWeight: 'bold', minWidth: '160px', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', boxSizing: 'border-box', borderTopRightRadius: `${gc.cornerRadius || 8}px`, borderBottomRightRadius: `${gc.cornerRadius || 8}px` }}>
                       {renderCompLayers(activePanelKey, '#ffcc00', true)}
                       {renderPanelText(
-  `rollout_s3_txt_${activePanelKey}_${panelTextKey}`,
-  { position: 'relative', zIndex: 3, whiteSpace: 'nowrap', flexShrink: 0, transform: getTextSkewTransform(activePanelKey), ...getTextAnimStyle(activePanelKey, panelAnimOverride) },
-  ppActive ? `${ppTeam} PP ${ppTimeStr}` : panelText,
-  ppActive ? [] : panelSizerTexts
+  `rollout_s3_txt_${activePanelKey}_${sideTextKey}`,
+  { position: 'relative', zIndex: 3, whiteSpace: 'nowrap', flexShrink: 0, transform: getTextSkewTransform(activePanelKey), ...getTextAnimStyle(activePanelKey, sideAnimOverride) },
+  sideText,
+  sideSizerTexts
 )}
                     </div>
                   </div>
@@ -1224,14 +1374,14 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
               elements (Chrome/OBS ignore <link rel="preload" as="video">). */}
           <div aria-hidden style={{ position: 'fixed', width: 1, height: 1, overflow: 'hidden', opacity: 0, pointerEvents: 'none', left: -10, top: -10 }}>
             {Array.from(new Map(
-              ['awayGoal', 'homeGoal', 'goal', 'ppPanel', 'delayedPenalty', 'rollout1', 'rollout2', 'rollout3', 'banner', 'awayTeam', 'homeTeam', 'clock', 'period']
+              MEDIA_KEYS
                 .map(key => resolveMedia(gc, key))
                 .filter(m => m.url)
                 .map(m => [m.url, m] as const)
             ).values()).map(({ url, isVid }) => isVid ? (
               <video
                 key={`preload_${url}`}
-                src={url}
+                src={mediaSrc(url)}
                 preload="auto"
                 muted
                 playsInline
