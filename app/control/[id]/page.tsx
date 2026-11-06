@@ -58,6 +58,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
   // Monotonic sequence stamped on every broadcast so the overlay can discard
   // late / out-of-order messages (local BroadcastChannel vs Supabase vs DB echo).
   const broadcastSeqRef = useRef<number>(0);
+  // Swap Teams: also swap the team names (off = graphics only)
+  const [swapIncludesNames, setSwapIncludesNames] = useState(false);
   // Which text field's sequence dropdown is open (its seq key), or null.
   const [openSeqEditor, setOpenSeqEditor] = useState<string | null>(null);
   const bannerTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -472,6 +474,68 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     }).eq('id', id).then();
 
     alert(`Pasted settings onto [${selectedComp}]!`);
+  };
+
+  // Swap every away-specific graphic setting with its home counterpart:
+  // Away/Home Team Box, Score, Goal Rollout Panel and Shots on Goal (colors, media,
+  // fonts, layers, animations...) plus the team box colors. Scores, SOG counts and
+  // penalties are game data and are not touched.
+  const swapTeamGraphics = () => {
+    const currentState = stateRef.current;
+    if (!currentState) return;
+
+    const msg = swapIncludesNames
+      ? 'Swap all Away and Home graphic settings AND team names?'
+      : 'Swap all Away and Home graphic settings? (Team names stay where they are.)';
+    if (!window.confirm(msg)) return;
+
+    const oldConfig = currentState.graphics_config || {};
+    const teamKey = /^(away|home)([A-Z][A-Za-z0-9]*_.+)$/; // awayTeam_bg_color, homeGoal_media_url, ...
+    const newConfig: Record<string, any> = {};
+
+    Object.keys(oldConfig).forEach(key => {
+      const m = key.match(teamKey);
+      if (m) {
+        const swappedKey = `${m[1] === 'away' ? 'home' : 'away'}${m[2]}`;
+        newConfig[swappedKey] = oldConfig[key];
+      } else {
+        newConfig[key] = oldConfig[key];
+      }
+    });
+
+    // Team box colors live outside graphics_config
+    const awayColor = currentState.away_color || oldConfig['awayTeam_bg_color'] || '#00468b';
+    const homeColor = currentState.home_color || oldConfig['homeTeam_bg_color'] || '#222222';
+
+    const updated: any = {
+      ...currentState,
+      away_color: homeColor,
+      home_color: awayColor,
+      graphics_config: newConfig,
+    };
+    if (swapIncludesNames) {
+      updated.away_name = currentState.home_name;
+      updated.home_name = currentState.away_name;
+    }
+
+    stateRef.current = updated;
+    setState(updated);
+    broadcastState(updated);
+    pushHistory(newConfig);
+
+    const dbPayload: any = {
+      away_color: updated.away_color,
+      home_color: updated.home_color,
+      graphics_config: newConfig,
+      clock_seconds: currentState.clock_seconds,
+      penalties: currentState.penalties,
+    };
+    if (swapIncludesNames) {
+      dbPayload.away_name = updated.away_name;
+      dbPayload.home_name = updated.home_name;
+    }
+    supabase.from('scoreboards').update(dbPayload).eq('id', id).then();
+
   };
 
   const currentTheme = getGVar('uiTheme', 'Light');
@@ -1979,6 +2043,25 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                 >
                   ↪ REDO
                 </button>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginRight: '6px' }}>
+                  <button
+                    onClick={swapTeamGraphics}
+                    title="Swap all Away (left) and Home (right) graphic settings"
+                    style={{ background: '#F36C21', color: '#fff', border: 'none', borderRadius: '4px', padding: '6px 12px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer', whiteSpace: 'nowrap' }}
+                  >
+                    ⇄ SWAP TEAMS
+                  </button>
+                  <label title="Also swap the team names" style={{ width: 'auto', display: 'flex', alignItems: 'center', gap: '3px', fontSize: '10px', cursor: 'pointer', whiteSpace: 'nowrap' }}>
+                    <input
+                      type="checkbox"
+                      checked={swapIncludesNames}
+                      onChange={(e) => setSwapIncludesNames(e.target.checked)}
+                      style={{ flex: 'none', width: 'auto', margin: 0 }}
+                    />
+                    + names
+                  </label>
+                </div>
 
                 <button 
                   onClick={copyComponentSettings}

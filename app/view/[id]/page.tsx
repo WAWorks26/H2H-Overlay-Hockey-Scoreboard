@@ -128,6 +128,9 @@ const loadMediaBlob = (url: string): Promise<string> => {
   return p;
 };
 
+// Style 3 (Compact Split Bug) team-name column width
+const S3_TEAM_W = 178;
+
 // Longest we will hold back a rollout / banner while its background video buffers.
 const MEDIA_WAIT_MS = 250;
 
@@ -1258,16 +1261,13 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
                     </div>
                   </div>
 
-                  <div style={{ display: 'flex', flexDirection: 'column', width: '192px', height: '100%', position: 'relative' }}>
+                  {/* Team names: 25% wider than before (was ~142px beside the score) */}
+                  <div style={{ display: 'flex', flexDirection: 'column', width: `${S3_TEAM_W}px`, height: '100%', position: 'relative' }}>
                     
                     <div style={{ display: 'flex', height: '50%', alignItems: 'stretch', position: 'relative' }}>
                       <div style={{ flex: 1, ...getCompStyle('awayTeam', state.away_color || '#00468b', '#ffffff', 26), padding: '0 12px', justifyContent: 'flex-start', overflow: 'hidden' }}>
                         {renderCompLayers('awayTeam', state.away_color || '#00468b')}
                         <span style={{ fontWeight: 'bold', position: 'relative', zIndex: 3, whiteSpace: 'nowrap', transform: getTextSkewTransform('awayTeam'), ...getTextAnimStyle('awayTeam') }}>{state.away_name}</span>
-                      </div>
-                      <div style={{ minWidth: '50px', ...getCompStyle('awayScore', '#002855', '#ffffff', 28), padding: '0 8px' }}>
-                        {renderCompLayers('awayScore', '#002855')}
-                        <span key={`awayScore_${state.away_score}`} style={{ fontWeight: 'bold', position: 'relative', zIndex: 3, whiteSpace: 'nowrap', transform: getTextSkewTransform('awayScore'), ...getTextAnimStyle('awayScore') }}>{state.away_score}</span>
                       </div>
                     </div>
 
@@ -1275,10 +1275,6 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
                       <div style={{ flex: 1, ...getCompStyle('homeTeam', state.home_color || '#222222', '#ffffff', 26), padding: '0 12px', justifyContent: 'flex-start', overflow: 'hidden' }}>
                         {renderCompLayers('homeTeam', state.home_color || '#222222')}
                         <span style={{ fontWeight: 'bold', position: 'relative', zIndex: 3, whiteSpace: 'nowrap', transform: getTextSkewTransform('homeTeam'), ...getTextAnimStyle('homeTeam') }}>{state.home_name}</span>
-                      </div>
-                      <div style={{ minWidth: '50px', ...getCompStyle('homeScore', '#111111', '#ffffff', 28), padding: '0 8px' }}>
-                        {renderCompLayers('homeScore', '#111111')}
-                        <span key={`homeScore_${state.home_score}`} style={{ fontWeight: 'bold', position: 'relative', zIndex: 3, whiteSpace: 'nowrap', transform: getTextSkewTransform('homeScore'), ...getTextAnimStyle('homeScore') }}>{state.home_score}</span>
                       </div>
                     </div>
                   </div>
@@ -1310,10 +1306,22 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
 
                   </div>
 
+                  {/* Score column, now after SOG */}
+                  <div style={{ display: 'flex', flexDirection: 'column', minWidth: '50px', height: '100%', position: 'relative' }}>
+                    <div style={{ height: '50%', ...getCompStyle('awayScore', '#002855', '#ffffff', 28), padding: '0 8px' }}>
+                      {renderCompLayers('awayScore', '#002855')}
+                      <span key={`awayScore_${state.away_score}`} style={{ fontWeight: 'bold', position: 'relative', zIndex: 3, whiteSpace: 'nowrap', transform: getTextSkewTransform('awayScore'), ...getTextAnimStyle('awayScore') }}>{state.away_score}</span>
+                    </div>
+                    <div style={{ height: '50%', ...getCompStyle('homeScore', '#111111', '#ffffff', 28), padding: '0 8px' }}>
+                      {renderCompLayers('homeScore', '#111111')}
+                      <span key={`homeScore_${state.home_score}`} style={{ fontWeight: 'bold', position: 'relative', zIndex: 3, whiteSpace: 'nowrap', transform: getTextSkewTransform('homeScore'), ...getTextAnimStyle('homeScore') }}>{state.home_score}</span>
+                    </div>
+                  </div>
+
                 </div>
 
                 {(awayPens.length > 0 || homePens.length > 0) && (
-                  <div style={{ position: 'absolute', top: '100%', left: '110px', width: '192px', display: 'flex', gap: '8px', zIndex: 10, marginTop: '4px' }}>
+                  <div style={{ position: 'absolute', top: '100%', left: '110px', width: `${S3_TEAM_W}px`, display: 'flex', gap: '8px', zIndex: 10, marginTop: '4px' }}>
                     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '4px' }}>
                       {awayPens.map(p => (
                         <div key={p.id} style={{ background: state.away_color || '#00468b', color: '#fff', padding: '6px 8px', borderRadius: '4px', fontSize: '12px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box' }}>
