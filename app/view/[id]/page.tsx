@@ -25,7 +25,8 @@ interface RolloutSeqItem { id?: string; text: string; dur?: string | number; ani
 // Which graphics_config sequence a right-panel mode reads. Away/Home goals share one.
 const seqKeyForMode = (mode: string) =>
   mode.startsWith('rollout') ? mode :
-  mode === 'delayedPenalty' ? 'delayedPenalty' :
+  (mode === 'delayedPenalty' || mode === 'awayDelayed' || mode === 'homeDelayed') ? 'delayedPenalty' :
+  (mode === 'awayTimeout' || mode === 'homeTimeout') ? 'timeout' :
   (mode === 'awayGoal' || mode === 'homeGoal' || mode === 'goal') ? 'goal' : '';
 
 const resolveSeq = (gc: Record<string, any>, seqKey: string, teamName?: string): RolloutSeqItem[] => {
@@ -88,7 +89,7 @@ function useTextSequence(items: RolloutSeqItem[], loop: boolean, activeKey: stri
 // the network: no buffering on a weak rink connection, and an OBS restart reloads
 // the media from disk instead of downloading it again.
 const MEDIA_CACHE_NAME = 'h2h-media-v1';
-const MEDIA_KEYS = ['awayGoal', 'homeGoal', 'goal', 'ppPanel', 'delayedPenalty', 'rollout1', 'rollout2', 'rollout3', 'banner', 'awayTeam', 'homeTeam', 'clock', 'period'];
+const MEDIA_KEYS = ['awayGoal', 'homeGoal', 'goal', 'ppPanel', 'awayPP', 'homePP', 'delayedPenalty', 'rollout1', 'rollout2', 'rollout3', 'banner', 'banner2', 'banner3', 'awayTeam', 'homeTeam', 'clock', 'period'];
 const blobUrlCache = new Map<string, string>();          // remote URL -> blob: URL
 const blobLoads = new Map<string, Promise<string>>();    // in-flight downloads
 
@@ -135,9 +136,20 @@ const S3_TEAM_W = 178;
 const MEDIA_WAIT_MS = 250;
 
 // Mirrors getCompVar's media inheritance (goal panels fall back to the team media).
-const resolveMedia = (gc: Record<string, any>, key: string) => {
+const resolveMedia = (gc: Record<string, any>, key: string): { url: string; isVid: boolean } => {
   const direct = gc?.[`${key}_media_url`];
-  if (direct) return { url: direct as string, isVid: !!gc[`${key}_is_video`] };
+  if (direct && key !== 'awayPP' && key !== 'homePP') return { url: direct as string, isVid: !!gc[`${key}_is_video`] };
+  // Timeouts draw with the team's power play panel, which falls back to the team logo
+  if (key === 'awayTimeout' || key === 'homeTimeout') return resolveMedia(gc, key === 'awayTimeout' ? 'awayPP' : 'homePP');
+  if (key === 'awayDelayed' || key === 'homeDelayed') return resolveMedia(gc, 'delayedPenalty');
+  if (key === 'awayPP' || key === 'homePP') {
+    const useTeam = gc?.[`${key}_use_team_media`] ?? gc?.ppPanel_use_team_media;
+    const team = key === 'awayPP' ? 'awayTeam' : 'homeTeam';
+    if (useTeam !== false && useTeam !== 'false' && gc?.[`${team}_media_url`]) {
+      return { url: gc[`${team}_media_url`] as string, isVid: !!gc[`${team}_is_video`] };
+    }
+  }
+  if ((key === 'awayPP' || key === 'homePP') && direct) return { url: direct as string, isVid: !!gc[`${key}_is_video`] };
   if (key === 'awayGoal' || key === 'homeGoal') {
     const team = key === 'awayGoal' ? 'awayTeam' : 'homeTeam';
     const inherited = gc?.[`${team}_media_url`];
@@ -157,6 +169,9 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
   const [displayedPanelText, setDisplayedPanelText] = useState('');
 
   const [bannerExiting, setBannerExiting] = useState(false);
+  // Which banner (component key) is in the banner slot: 'banner' | 'banner2' | 'banner3'
+  const [displayedBannerKey, setDisplayedBannerKey] = useState('banner');
+  const bannerKeyRef = useRef('banner');
   const [displayedBannerActive, setDisplayedBannerActive] = useState(false);
   const [displayedBannerText, setDisplayedBannerText] = useState('');
 
@@ -266,6 +281,9 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
         }
 
         const bActive = !!data.banner_active;
+        const bKey = data.graphics_config?.active_banner || 'banner';
+        bannerKeyRef.current = bKey;
+        setDisplayedBannerKey(bKey);
         setDisplayedBannerActive(bActive);
         setDisplayedBannerText(data.banner_text || '');
         bannerActiveRef.current = bActive;
@@ -341,6 +359,27 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
       }
 
       const isBannerOn = !!mergedState.banner_active;
+      const newBannerKey = mergedState.graphics_config
+        ? (mergedState.graphics_config.active_banner || 'banner')
+        : bannerKeyRef.current;
+
+      const showBanner = (key: string) => {
+        bannerActiveRef.current = true;
+        bannerKeyRef.current = key;
+        const token = ++bannerShowTokenRef.current;
+        waitForMedia(mergedState.graphics_config, key).then(() => {
+          if (token !== bannerShowTokenRef.current || !bannerActiveRef.current) return;
+          if (bannerExitTimerRef.current) {
+            clearTimeout(bannerExitTimerRef.current);
+            bannerExitTimerRef.current = null;
+          }
+          setDisplayedBannerKey(key);
+          setBannerExiting(false);
+          setDisplayedBannerActive(true);
+          setDisplayedBannerText(mergedState.banner_text || '');
+        });
+      };
+
       if (!isBannerOn && bannerActiveRef.current) {
         bannerShowTokenRef.current++; // cancel a banner still waiting on its media
         setBannerExiting(true);
@@ -352,18 +391,20 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
           setDisplayedBannerActive(false);
         }, 500);
       } else if (isBannerOn && !bannerActiveRef.current) {
-        bannerActiveRef.current = true;
+        showBanner(newBannerKey);
+      } else if (isBannerOn && newBannerKey !== bannerKeyRef.current) {
+        // Swap to another banner: retract the current one, then bring in the new one
+        bannerKeyRef.current = newBannerKey;
         const token = ++bannerShowTokenRef.current;
-        waitForMedia(mergedState.graphics_config, 'banner').then(() => {
-          if (token !== bannerShowTokenRef.current || !bannerActiveRef.current) return;
-          if (bannerExitTimerRef.current) {
-            clearTimeout(bannerExitTimerRef.current);
-            bannerExitTimerRef.current = null;
-          }
+        setBannerExiting(true);
+        if (bannerExitTimerRef.current) clearTimeout(bannerExitTimerRef.current);
+        bannerExitTimerRef.current = setTimeout(() => {
+          bannerExitTimerRef.current = null;
+          if (token !== bannerShowTokenRef.current) return;
           setBannerExiting(false);
-          setDisplayedBannerActive(true);
-          setDisplayedBannerText(mergedState.banner_text || '');
-        });
+          setDisplayedBannerActive(false);
+          showBanner(newBannerKey);
+        }, 500);
       } else if (isBannerOn) {
         setDisplayedBannerText(mergedState.banner_text || '');
       }
@@ -408,9 +449,11 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
   // ---------- Text sequences ----------
   const gcLive = state?.graphics_config || {};
   const panelSeqKey = seqKeyForMode(displayedPanelMode);
+  // Team name for {TEAM} in goal / timeout / per-team delayed penalty texts
   const goalTeam =
-    displayedPanelMode === 'awayGoal' ? (state?.away_name || 'AWAY') :
-    displayedPanelMode === 'homeGoal' ? (state?.home_name || 'HOME') : undefined;
+    ['awayGoal', 'awayTimeout', 'awayDelayed'].includes(displayedPanelMode) ? (state?.away_name || 'AWAY') :
+    ['homeGoal', 'homeTimeout', 'homeDelayed'].includes(displayedPanelMode) ? (state?.home_name || 'HOME') :
+    displayedPanelMode === 'delayedPenalty' ? '' : undefined;
   const panelSeqItems = resolveSeq(gcLive, panelSeqKey, goalTeam);
   const panelSeq = useTextSequence(panelSeqItems, isSeqLoop(gcLive, panelSeqKey), panelSeqKey ? displayedPanelMode : '');
 
@@ -427,8 +470,8 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
   const ppSeqItemsRaw = ppSideLive ? resolveSeq(gcLive, 'ppPanel') : [];
   const ppSeq = useTextSequence(ppSeqItemsRaw, isSeqLoop(gcLive, 'ppPanel'), ppSideLive ? `pp_${ppSideLive}` : '');
 
-  const bannerSeqItems = displayedBannerActive ? resolveSeq(gcLive, 'banner') : [];
-  const bannerSeq = useTextSequence(bannerSeqItems, isSeqLoop(gcLive, 'banner'), displayedBannerActive ? 'banner' : '');
+  const bannerSeqItems = displayedBannerActive ? resolveSeq(gcLive, displayedBannerKey) : [];
+  const bannerSeq = useTextSequence(bannerSeqItems, isSeqLoop(gcLive, displayedBannerKey), displayedBannerActive ? displayedBannerKey : '');
 
   if (!state) return null;
 
@@ -457,18 +500,21 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
 
   const currentMode = displayedPanelMode;
   const isRollout = currentMode.startsWith('rollout');
-  const isDelayed = currentMode === 'delayedPenalty';
+  const isDelayed = currentMode === 'delayedPenalty' || currentMode === 'awayDelayed' || currentMode === 'homeDelayed';
+  const isTimeout = currentMode === 'awayTimeout' || currentMode === 'homeTimeout';
   const isAwayGoal = currentMode === 'awayGoal';
   const isHomeGoal = currentMode === 'homeGoal';
   const isGoal = isAwayGoal || isHomeGoal || currentMode === 'goal';
 
-  const showRightPanel = isRollout || isDelayed || ppActive || isGoal || panelExiting;
+  const showRightPanel = isRollout || isDelayed || isTimeout || ppActive || isGoal || panelExiting;
 
   // Current side-panel text: sequence item if one is configured, else the plain text.
-  const panelHasText = isRollout || isGoal || isDelayed;
-  const basePanelText = isDelayed
-    ? (gc.delayedPenalty_text || 'DELAYED PENALTY')
-    : (displayedPanelText || state.right_panel_text || '');
+  const panelHasText = isRollout || isGoal || isDelayed || isTimeout;
+  const basePanelText = (
+    isDelayed ? (gc.delayedPenalty_text || 'DELAYED PENALTY') :
+    isTimeout ? (gc.timeout_text || 'TIMEOUT {TEAM}') :
+    (displayedPanelText || state.right_panel_text || '')
+  ).replace(/{TEAM}/g, goalTeam ?? '').replace(/\s{2,}/g, ' ').trim();
   const activeSeqItem = panelHasText && panelSeqItems.length > 0 ? panelSeqItems[panelSeq.index] : null;
   const panelText = activeSeqItem ? activeSeqItem.text : basePanelText;
   const panelTextKey = activeSeqItem
@@ -528,36 +574,51 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
   );
 
   const activePanelKey = 
-    ppActive ? 'ppPanel' :
+    ppActive ? (ppSide === 'away' ? 'awayPP' : 'homePP') :
     isAwayGoal ? 'awayGoal' :
     isHomeGoal ? 'homeGoal' :
     isGoal ? 'goal' :
     isDelayed ? 'delayedPenalty' :
+    currentMode === 'awayTimeout' ? 'awayPP' :
+    currentMode === 'homeTimeout' ? 'homePP' :
     isRollout ? currentMode : 'rollout1';
 
   const getCompVar = (compKey: string, propSuffix: string, fallback: any = undefined) => {
-    // Power play panel: use the PP team's team-box logo/video as its background
-    // (on by default; toggle in Component Editor > Power Play). The PP panel's own
-    // scale / alpha / position still win if set, so the logo can be framed for the panel.
-    if (compKey === 'ppPanel' && ppSide) {
-      const useTeam = gc.ppPanel_use_team_media !== false && gc.ppPanel_use_team_media !== 'false';
-      const team = ppSide === 'away' ? 'awayTeam' : 'homeTeam';
+    // Power play panels: one per team (awayPP / homePP) so each team's logo can be
+    // framed independently. Lookup order:
+    //   media url / video / loop: PP team's team-box media (if "Team Logo BG" is on and
+    //     the team has media) -> this panel's own -> shared ppPanel
+    //   everything else: this panel's own -> shared ppPanel (older settings) ->
+    //     the team box's value for logo scale/alpha/position -> default
+    if (compKey === 'awayPP' || compKey === 'homePP') {
+      const has = (v: any) => v !== undefined && v !== '';
+      const team = compKey === 'awayPP' ? 'awayTeam' : 'homeTeam';
+      const useTeamRaw = has(gc[`${compKey}_use_team_media`]) ? gc[`${compKey}_use_team_media`] : gc.ppPanel_use_team_media;
+      const useTeam = useTeamRaw !== false && useTeamRaw !== 'false';
       const teamUrl = gc[`${team}_media_url`];
-      if (useTeam && teamUrl) {
-        if (['media_url', 'is_video', 'media_loop'].includes(propSuffix)) {
-          const v = gc[`${team}_${propSuffix}`];
-          return v !== undefined && v !== '' ? v : fallback;
-        }
-        if (['img_alpha', 'img_scale', 'img_x', 'img_y', 'use_global_skew'].includes(propSuffix)) {
-          const own = gc[`ppPanel_${propSuffix}`];
-          if (own !== undefined && own !== '') return own;
-          const v = gc[`${team}_${propSuffix}`];
-          return v !== undefined && v !== '' ? v : fallback;
-        }
+
+      if (useTeam && teamUrl && ['media_url', 'is_video', 'media_loop'].includes(propSuffix)) {
+        const v = gc[`${team}_${propSuffix}`];
+        return has(v) ? v : fallback;
       }
+      const own = gc[`${compKey}_${propSuffix}`];
+      if (has(own)) return own;
+      const shared = gc[`ppPanel_${propSuffix}`];
+      if (has(shared)) return shared;
+      if (useTeam && teamUrl && ['img_alpha', 'img_scale', 'img_x', 'img_y', 'use_global_skew'].includes(propSuffix)) {
+        const v = gc[`${team}_${propSuffix}`];
+        if (has(v)) return v;
+      }
+      return fallback;
     }
 
     const directVal = gc[`${compKey}_${propSuffix}`];
+
+    if ((compKey === 'banner2' || compKey === 'banner3') && (directVal === undefined || directVal === '')
+        && !['media_url', 'is_video', 'text'].includes(propSuffix)) {
+      const b1 = gc[`banner_${propSuffix}`];
+      if (b1 !== undefined && b1 !== '') return b1;
+    }
     if (directVal !== undefined && directVal !== '') return directVal;
 
     if (compKey === 'awayGoal' || compKey === 'homeGoal') {
@@ -1056,9 +1117,9 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
                     position: 'absolute', inset: 0, zIndex: 99999, display: 'flex', alignItems: 'stretch', height: '100%',
                     animation: bannerExiting ? 'animRolloutRetractToLeft 0.5s cubic-bezier(0.4, 0, 0.2, 1) forwards' : 'animRolloutShowFromLeft 0.5s cubic-bezier(0.1, 0.9, 0.2, 1) forwards'
                   }}>
-                    <div style={{ ...getCompStyle('banner', '#007bff', '#ffffff', 32), fontWeight: 'bold', textAlign: 'center', width: '100%', height: '100%', border: 'none' }}>
-                      {renderCompLayers('banner', '#007bff')}
-                      <div key={`banner_txt_${bannerTextKey}`} style={{ transform: getTextSkewTransform('banner'), width: '100%', textAlign: 'center', zIndex: 3, whiteSpace: 'nowrap', paddingRight: '8px', ...getTextAnimStyle('banner', bannerAnimOverride) }}>
+                    <div style={{ ...getCompStyle(displayedBannerKey, '#007bff', '#ffffff', 32), fontWeight: 'bold', textAlign: 'center', width: '100%', height: '100%', border: 'none' }}>
+                      {renderCompLayers(displayedBannerKey, '#007bff')}
+                      <div key={`banner_txt_${displayedBannerKey}_${bannerTextKey}`} style={{ transform: getTextSkewTransform(displayedBannerKey), width: '100%', textAlign: 'center', zIndex: 3, whiteSpace: 'nowrap', paddingRight: '8px', ...getTextAnimStyle(displayedBannerKey, bannerAnimOverride) }}>
                         {bannerText}
                       </div>
                     </div>
@@ -1188,14 +1249,14 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
                       {renderCompLayers(activePanelKey, '#ffcc00', true)}
                       {ppActive && !ppCustom ? (
                         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', position: 'relative', zIndex: 3 }}>
-                          <span style={{ fontSize: '12px', textTransform: 'uppercase', marginBottom: '2px', lineHeight: 1 }}>{ppSituationStr || `${ppTeam} PP`}</span>
-                          <span style={{ fontSize: '30px', lineHeight: 1 }}>{ppTimeStr}</span>
+                          <span style={{ fontSize: '0.6em', textTransform: 'uppercase', marginBottom: '2px', lineHeight: 1 }}>{ppSituationStr || `${ppTeam} PP`}</span>
+                          <span style={{ fontSize: '1.5em', lineHeight: 1 }}>{ppTimeStr}</span>
                         </div>
                       ) : (
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', position: 'relative', zIndex: 3 }}>
                           {renderPanelText(
   `rollout_s2_txt_${activePanelKey}_${sideTextKey}`,
-  { fontSize: '20px', lineHeight: 1, paddingRight: '8px', whiteSpace: 'nowrap', flexShrink: 0, transform: getTextSkewTransform(activePanelKey), ...getTextAnimStyle(activePanelKey, sideAnimOverride) },
+  { lineHeight: 1, paddingRight: '8px', whiteSpace: 'nowrap', flexShrink: 0, transform: getTextSkewTransform(activePanelKey), ...getTextAnimStyle(activePanelKey, sideAnimOverride) },
   sideText,
   sideSizerTexts
 )}
@@ -1211,9 +1272,9 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
                     position: 'absolute', inset: 0, zIndex: 99999, display: 'flex', alignItems: 'stretch', height: '100%',
                     animation: bannerExiting ? 'animRolloutRetractToLeft 0.5s cubic-bezier(0.4, 0, 0.2, 1) forwards' : 'animRolloutShowFromLeft 0.5s cubic-bezier(0.1, 0.9, 0.2, 1) forwards'
                   }}>
-                    <div style={{ ...getCompStyle('banner', '#007bff', '#ffffff', 32), fontWeight: 'bold', textAlign: 'center', width: '100%', height: '100%' }}>
-                      {renderCompLayers('banner', '#007bff')}
-                      <div key={`banner_txt_${bannerTextKey}`} style={{ transform: getTextSkewTransform('banner'), width: '100%', textAlign: 'center', zIndex: 3, whiteSpace: 'nowrap', paddingRight: '8px', ...getTextAnimStyle('banner', bannerAnimOverride) }}>
+                    <div style={{ ...getCompStyle(displayedBannerKey, '#007bff', '#ffffff', 32), fontWeight: 'bold', textAlign: 'center', width: '100%', height: '100%' }}>
+                      {renderCompLayers(displayedBannerKey, '#007bff')}
+                      <div key={`banner_txt_${displayedBannerKey}_${bannerTextKey}`} style={{ transform: getTextSkewTransform(displayedBannerKey), width: '100%', textAlign: 'center', zIndex: 3, whiteSpace: 'nowrap', paddingRight: '8px', ...getTextAnimStyle(displayedBannerKey, bannerAnimOverride) }}>
                         {bannerText}
                       </div>
                     </div>
@@ -1347,7 +1408,7 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
                     position: 'absolute', left: '100%', top: 0, bottom: 0, zIndex: 1,
                     animation: panelExiting ? 'animRolloutRetractToLeft 0.5s cubic-bezier(0.4, 0, 0.2, 1) forwards' : 'animRolloutShowFromLeft 0.5s cubic-bezier(0.1, 0.9, 0.2, 1) forwards'
                   }}>
-                    <div style={{ padding: '0 20px', ...getCompStyle(activePanelKey, '#ffcc00', '#ffffff', 20), fontSize: '20px', fontWeight: 'bold', minWidth: '160px', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', boxSizing: 'border-box', borderTopRightRadius: `${gc.cornerRadius || 8}px`, borderBottomRightRadius: `${gc.cornerRadius || 8}px` }}>
+                    <div style={{ padding: '0 20px', ...getCompStyle(activePanelKey, '#ffcc00', '#ffffff', 20), fontWeight: 'bold', minWidth: '160px', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', boxSizing: 'border-box', borderTopRightRadius: `${gc.cornerRadius || 8}px`, borderBottomRightRadius: `${gc.cornerRadius || 8}px` }}>
                       {renderCompLayers(activePanelKey, '#ffcc00', true)}
                       {renderPanelText(
   `rollout_s3_txt_${activePanelKey}_${sideTextKey}`,
@@ -1365,9 +1426,9 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
                     position: 'absolute', inset: 0, zIndex: 99999, display: 'flex', alignItems: 'stretch', height: '100%',
                     animation: bannerExiting ? 'animRolloutRetractToLeft 0.5s cubic-bezier(0.4, 0, 0.2, 1) forwards' : 'animRolloutShowFromLeft 0.5s cubic-bezier(0.1, 0.9, 0.2, 1) forwards'
                   }}>
-                    <div style={{ ...getCompStyle('banner', '#007bff', '#ffffff', 32), fontWeight: 'bold', textAlign: 'center', width: '100%', height: '100%', border: 'none' }}>
-                      {renderCompLayers('banner', '#007bff')}
-                      <div key={`banner_txt_${bannerTextKey}`} style={{ transform: getTextSkewTransform('banner'), width: '100%', textAlign: 'center', zIndex: 3, whiteSpace: 'nowrap', ...getTextAnimStyle('banner', bannerAnimOverride) }}>
+                    <div style={{ ...getCompStyle(displayedBannerKey, '#007bff', '#ffffff', 32), fontWeight: 'bold', textAlign: 'center', width: '100%', height: '100%', border: 'none' }}>
+                      {renderCompLayers(displayedBannerKey, '#007bff')}
+                      <div key={`banner_txt_${displayedBannerKey}_${bannerTextKey}`} style={{ transform: getTextSkewTransform(displayedBannerKey), width: '100%', textAlign: 'center', zIndex: 3, whiteSpace: 'nowrap', ...getTextAnimStyle(displayedBannerKey, bannerAnimOverride) }}>
                         {bannerText}
                       </div>
                     </div>

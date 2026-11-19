@@ -25,9 +25,10 @@ const newSeqId = () => `${Date.now().toString(36)}${Math.random().toString(36).s
 const DEFAULT_HOTKEYS: Record<string, string> = {
   toggleClock: 'Space', resetClock: '', addMin: '', subMin: '', addSec: '', subSec: '',
   resetAllStats: '', clearPenalties: '', triggerRollout1: 'Digit1', triggerRollout2: 'Digit2',
-  triggerRollout3: 'Digit3', triggerDelayedPenalty: 'KeyD', triggerBanner: 'KeyB',
+  triggerRollout3: 'Digit3', triggerDelayedPenalty: 'KeyD', triggerBanner: 'KeyB', triggerBanner2: '', triggerBanner3: '',
   addAwayGoal: 'KeyA', subAwayGoal: 'KeyZ', addAwaySog: 'KeyS', subAwaySog: '', addAwayPenalty: '',
   addHomeGoal: 'KeyH', subHomeGoal: 'KeyN', addHomeSog: 'KeyJ', subHomeSog: '', addHomePenalty: '',
+  triggerAwayTimeout: '', triggerHomeTimeout: '', triggerAwayDelayed: '', triggerHomeDelayed: '',
 };
 
 export default function ControlPanelPage({ params }: { params: Promise<{ id: string }> }) {
@@ -112,7 +113,26 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
       const { data, error } = await supabase.from('scoreboards').select('*').eq('id', id).single();
       if (error) console.error("Supabase Error:", error.message);
       if (data) {
-        const initialConfig = data.graphics_config || {};
+        let initialConfig = data.graphics_config || {};
+
+        // One-time split of the shared Power Play panel into Away / Home panels:
+        // copy the existing ppPanel graphic settings to both so nothing changes visually
+        // and each can then be adjusted on its own. PP text/sequence stays shared.
+        const hasSplitPP = Object.keys(initialConfig).some(k => k.startsWith('awayPP_') || k.startsWith('homePP_'));
+        if (!hasSplitPP) {
+          const sharedKeys = Object.keys(initialConfig).filter(k =>
+            k.startsWith('ppPanel_') && !['ppPanel_seq', 'ppPanel_seq_loop', 'ppPanel_text'].includes(k));
+          if (sharedKeys.length > 0) {
+            const migrated = { ...initialConfig };
+            sharedKeys.forEach(k => {
+              const prop = k.slice('ppPanel_'.length);
+              migrated[`awayPP_${prop}`] = initialConfig[k];
+              migrated[`homePP_${prop}`] = initialConfig[k];
+            });
+            initialConfig = migrated;
+            supabase.from('scoreboards').update({ graphics_config: migrated }).eq('id', id).then();
+          }
+        }
         const initialState = { 
           ...data, 
           penalties: data.penalties || [],
@@ -638,16 +658,17 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     await supabase.from('scoreboards').update(updatePayload).eq('id', id);
   };
 
-  const triggerRolloutWithAutoHide = (modeName: string, textValue: string) => {
+  // settingsKey: whose duration / auto-hide settings to use (defaults to the mode itself)
+  const triggerRolloutWithAutoHide = (modeName: string, textValue: string, settingsKey: string = modeName, defaultSecs = 5) => {
     if (rolloutTimerRef.current) {
       clearTimeout(rolloutTimerRef.current);
       rolloutTimerRef.current = null;
     }
 
-    const durationVal = parseInt(getRefGVar(`${modeName}_duration`, '5'));
-    const duration = isNaN(durationVal) || durationVal < 1 ? 5 : durationVal;
+    const durationVal = parseInt(getRefGVar(`${settingsKey}_duration`, String(defaultSecs)));
+    const duration = isNaN(durationVal) || durationVal < 1 ? defaultSecs : durationVal;
 
-    const isAutoHide = getRefGVar(`${modeName}_autohide`, true);
+    const isAutoHide = getRefGVar(`${settingsKey}_autohide`, true);
     const shouldAutoHide = isAutoHide === true || isAutoHide === 'true';
 
     const currentState = stateRef.current;
@@ -672,8 +693,28 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
 
     if (modeName !== 'none' && shouldAutoHide) {
       rolloutTimerRef.current = setTimeout(() => {
-        updateField('right_panel_mode', 'none');
+        // only hide if this rollout is still the one showing
+        if (stateRef.current?.right_panel_mode === modeName) updateField('right_panel_mode', 'none');
       }, duration * 1000);
+    }
+  };
+
+  // Per-team side rollouts. Pressing the showing one again hides it; pressing another swaps.
+  //  Timeout:         awayTimeout / homeTimeout - drawn with that team's Power Play panel graphics
+  //  Delayed penalty: awayDelayed / homeDelayed - drawn with the Delayed Penalty graphics
+  const triggerTeamRollout = (kind: 'timeout' | 'delayed', team: 'away' | 'home') => {
+    const currentState = stateRef.current;
+    if (!currentState) return;
+    const modeName = `${team}${kind === 'timeout' ? 'Timeout' : 'Delayed'}`;
+    if (currentState.right_panel_mode === modeName) {
+      if (rolloutTimerRef.current) clearTimeout(rolloutTimerRef.current);
+      updateField('right_panel_mode', 'none');
+      return;
+    }
+    if (kind === 'timeout') {
+      triggerRolloutWithAutoHide(modeName, getRefGVar('timeout_text', 'TIMEOUT {TEAM}'), 'timeout', 30);
+    } else {
+      triggerRolloutWithAutoHide(modeName, getRefGVar('delayedPenalty_text', 'DELAYED PENALTY'), 'delayedPenalty', 5);
     }
   };
 
@@ -705,44 +746,59 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     }
   };
 
-  const triggerBanner = async () => {
+  // Three full-width banners share one banner slot on the overlay (only one shows at a
+  // time). Which one is up is stored as graphics_config.active_banner:
+  // 'banner' (Banner 1), 'banner2' or 'banner3'. Pressing the showing banner's button
+  // hides it; pressing a different one swaps to it.
+  const BANNER_KEYS = ['banner', 'banner2', 'banner3'];
+  const BANNER_DEFAULT_TEXT: Record<string, string> = { banner: 'FULL WIDTH BANNER', banner2: 'BANNER 2', banner3: 'BANNER 3' };
+
+  const triggerBanner = async (n: number = 1) => {
     const currentState = stateRef.current;
     if (!currentState) return;
+    const key = BANNER_KEYS[n - 1] || 'banner';
 
     if (bannerTimerRef.current) {
       clearTimeout(bannerTimerRef.current);
       bannerTimerRef.current = null;
     }
 
-    const isActive = !currentState.banner_active;
-    const txt = getRefGVar('banner_text', "FULL WIDTH BANNER");
-    
-    const durationVal = parseInt(getRefGVar('banner_duration', '5'));
+    const currentKey = currentState.graphics_config?.active_banner || 'banner';
+    const isActive = !(currentState.banner_active && currentKey === key);
+    const txt = getRefGVar(`${key}_text`, BANNER_DEFAULT_TEXT[key]);
+
+    const durationVal = parseInt(getRefGVar(`${key}_duration`, '5'));
     const duration = isNaN(durationVal) || durationVal < 1 ? 5 : durationVal;
-    
-    const isAutoHide = getRefGVar('banner_autohide', true);
+
+    const isAutoHide = getRefGVar(`${key}_autohide`, true);
     const shouldAutoHide = isAutoHide === true || isAutoHide === 'true';
 
+    const newConfig = { ...(currentState.graphics_config || {}), active_banner: key };
     const updated = {
       ...currentState,
       banner_active: isActive,
-      banner_text: txt
+      banner_text: txt,
+      graphics_config: newConfig,
     };
 
     stateRef.current = updated;
     setState(updated);
     broadcastState(updated);
-    
-    supabase.from('scoreboards').update({ 
-      banner_active: isActive, 
-      banner_text: txt, 
+
+    supabase.from('scoreboards').update({
+      banner_active: isActive,
+      banner_text: txt,
+      graphics_config: newConfig,
       clock_seconds: currentState.clock_seconds,
       penalties: currentState.penalties
     }).eq('id', id).then();
 
     if (isActive && shouldAutoHide) {
       bannerTimerRef.current = setTimeout(() => {
-        updateField('banner_active', false);
+        // only hide if this banner is still the one showing
+        if ((stateRef.current?.graphics_config?.active_banner || 'banner') === key) {
+          updateField('banner_active', false);
+        }
       }, duration * 1000);
     }
   };
@@ -784,7 +840,13 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
         case 'triggerRollout2': triggerRollout(2); break;
         case 'triggerRollout3': triggerRollout(3); break;
         case 'triggerDelayedPenalty': triggerDelayedPenalty(); break;
-        case 'triggerBanner': triggerBanner(); break;
+        case 'triggerBanner': triggerBanner(1); break;
+        case 'triggerAwayTimeout': triggerTeamRollout('timeout', 'away'); break;
+        case 'triggerHomeTimeout': triggerTeamRollout('timeout', 'home'); break;
+        case 'triggerAwayDelayed': triggerTeamRollout('delayed', 'away'); break;
+        case 'triggerHomeDelayed': triggerTeamRollout('delayed', 'home'); break;
+        case 'triggerBanner2': triggerBanner(2); break;
+        case 'triggerBanner3': triggerBanner(3); break;
         case 'addAwayGoal': adjStat('away', 'score', 1); break;
         case 'subAwayGoal': adjStat('away', 'score', -1); break;
         case 'addAwaySog': adjStat('away', 'sog', 1); break;
@@ -1106,7 +1168,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     borderColor: themeVars.borderCol
   };
 
-  const isRolloutElement = ['rollout1', 'rollout2', 'rollout3', 'awayGoal', 'homeGoal', 'delayedPenalty', 'banner'].includes(selectedComp);
+  const isRolloutElement = ['rollout1', 'rollout2', 'rollout3', 'awayGoal', 'homeGoal', 'delayedPenalty', 'banner', 'banner2', 'banner3'].includes(selectedComp);
 
   // ---------- Text sequences (rollouts, goals, delayed penalty, banner) ----------
   // Every rollout-style text field can hold a sequence of texts. The sequence is
@@ -1127,9 +1189,12 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     { seqKey: 'rollout1', label: 'Rollout 1 Text:', textKey: 'rollout1_text', defaultText: 'ROLLOUT 1', durationKeys: ['rollout1_duration'], displayName: 'Rollout 1' },
     { seqKey: 'rollout2', label: 'Rollout 2 Text:', textKey: 'rollout2_text', defaultText: 'ROLLOUT 2', durationKeys: ['rollout2_duration'], displayName: 'Rollout 2' },
     { seqKey: 'rollout3', label: 'Rollout 3 Text:', textKey: 'rollout3_text', defaultText: 'ROLLOUT 3', durationKeys: ['rollout3_duration'], displayName: 'Rollout 3' },
-    { seqKey: 'delayedPenalty', label: 'Delayed Penalty Text:', textKey: 'delayedPenalty_text', defaultText: 'DELAYED PENALTY', durationKeys: ['delayedPenalty_duration'], displayName: 'the Delayed Penalty rollout' },
+    { seqKey: 'delayedPenalty', label: 'Delayed Penalty Text:', textKey: 'delayedPenalty_text', defaultText: 'DELAYED PENALTY', durationKeys: ['delayedPenalty_duration'], displayName: 'the Delayed Penalty rollout', hint: 'Used by the Away / Home DELAYED PEN buttons. {TEAM} is replaced with the penalized team name.' },
+    { seqKey: 'timeout', label: 'Timeout Text:', textKey: 'timeout_text', defaultText: 'TIMEOUT {TEAM}', durationKeys: ['timeout_duration'], displayName: 'the Timeout rollout', hint: '{TEAM} is replaced with the team that called the timeout. Graphics come from that team\'s Power Play panel.' },
     { seqKey: 'ppPanel', label: 'Power Play Text:', textKey: 'ppPanel_text', defaultText: '{TEAM} PP {TIME}', durationKeys: [], displayName: 'the Power Play panel', hint: 'Placeholders: {TEAM} = team on the power play, {TIME} = PP time remaining (live), {SITUATION} = e.g. 5 VS 4. The PP panel stays up for the whole power play.' },
-    { seqKey: 'banner', label: 'Banner Text:', textKey: 'banner_text', defaultText: 'FULL WIDTH BANNER', durationKeys: ['banner_duration'], displayName: 'the Banner' },
+    { seqKey: 'banner', label: 'Banner 1 Text:', textKey: 'banner_text', defaultText: 'FULL WIDTH BANNER', durationKeys: ['banner_duration'], displayName: 'Banner 1' },
+    { seqKey: 'banner2', label: 'Banner 2 Text:', textKey: 'banner2_text', defaultText: 'BANNER 2', durationKeys: ['banner2_duration'], displayName: 'Banner 2' },
+    { seqKey: 'banner3', label: 'Banner 3 Text:', textKey: 'banner3_text', defaultText: 'BANNER 3', durationKeys: ['banner3_duration'], displayName: 'Banner 3' },
   ];
 
   const getTextSeq = (f: SeqFieldDef): RolloutSeqItem[] => {
@@ -1698,12 +1763,22 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
               <button className="btn btn-secondary-theme" onClick={() => adjStat('away', 'sog', 1)}>+ SOG</button>
               <button className="btn btn-secondary-theme" onClick={() => adjStat('away', 'sog', -1)}>-1 SOG</button>
             </div>
+            <div className="row" style={{ marginTop: '-4px', padding: '0 10px', position: 'relative', zIndex: 1 }}>
+              <span style={{ width: '80px', flex: 'none', fontSize: '11px', fontWeight: 'bold', opacity: 0.7 }}>{state.away_name}</span>
+              <button className="btn" style={{ background: state.right_panel_mode === 'awayTimeout' ? '#F36C21' : '#1e5bb8', color: '#fff', whiteSpace: 'nowrap' }} title="Show the away timeout rollout (click again to hide)" onClick={() => triggerTeamRollout('timeout', 'away')}>TIMEOUT</button>
+              <button className="btn" style={{ background: state.right_panel_mode === 'awayDelayed' ? '#F36C21' : '#c0392b', color: '#fff', whiteSpace: 'nowrap' }} title="Show the delayed penalty rollout for away (click again to hide)" onClick={() => triggerTeamRollout('delayed', 'away')}>DELAYED PEN</button>
+            </div>
             <div className="row" style={{ background: themeVars.bgInput, padding: '10px', borderRadius: '6px', position: 'relative', zIndex: 1 }}>
               <input type="text" value={state.home_name} onChange={(e) => updateField('home_name', e.target.value)} style={{ maxWidth: '80px', flex: 'none', fontWeight: 'bold' }} />
               <button className="btn btn-secondary-theme" onClick={() => adjStat('home', 'score', 1)}>+ GOAL</button>
               <button className="btn btn-secondary-theme" onClick={() => adjStat('home', 'score', -1)}>-1 G</button>
               <button className="btn btn-secondary-theme" onClick={() => adjStat('home', 'sog', 1)}>+ SOG</button>
               <button className="btn btn-secondary-theme" onClick={() => adjStat('home', 'sog', -1)}>-1 SOG</button>
+            </div>
+            <div className="row" style={{ marginTop: '-4px', padding: '0 10px', position: 'relative', zIndex: 1 }}>
+              <span style={{ width: '80px', flex: 'none', fontSize: '11px', fontWeight: 'bold', opacity: 0.7 }}>{state.home_name}</span>
+              <button className="btn" style={{ background: state.right_panel_mode === 'homeTimeout' ? '#F36C21' : '#1e5bb8', color: '#fff', whiteSpace: 'nowrap' }} title="Show the home timeout rollout (click again to hide)" onClick={() => triggerTeamRollout('timeout', 'home')}>TIMEOUT</button>
+              <button className="btn" style={{ background: state.right_panel_mode === 'homeDelayed' ? '#F36C21' : '#c0392b', color: '#fff', whiteSpace: 'nowrap' }} title="Show the delayed penalty rollout for home (click again to hide)" onClick={() => triggerTeamRollout('delayed', 'home')}>DELAYED PEN</button>
             </div>
             <div className="row" style={{ position: 'relative', zIndex: 1 }}>
               <button className="btn btn-secondary-theme" onClick={() => resetStats('away')}>RESET AWAY STATS</button>
@@ -1782,7 +1857,23 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             </div>
             <div className="row" style={{ marginTop: '5px' }}>
                 <button className="btn btn-orange" style={{ borderRadius: '6px' }} onClick={triggerDelayedPenalty}>DELAYED PENALTY</button>
-                <button className="btn btn-purple" style={{ borderRadius: '6px' }} onClick={triggerBanner}>FULL WIDTH BANNER</button>
+            </div>
+            <div className="row" style={{ marginTop: '5px' }}>
+                {[1, 2, 3].map(n => {
+                  const key = n === 1 ? 'banner' : `banner${n}`;
+                  const isUp = !!state.banner_active && (getGVar('active_banner', 'banner') === key);
+                  return (
+                    <button
+                      key={`banner_btn_${n}`}
+                      className="btn btn-purple"
+                      style={{ borderRadius: '6px', outline: isUp ? '3px solid #F36C21' : 'none', outlineOffset: '-3px' }}
+                      title={isUp ? 'Showing now - click to hide' : `Show full width banner ${n}`}
+                      onClick={() => triggerBanner(n)}
+                    >
+                      BANNER {n}{isUp ? ' ●' : ''}
+                    </button>
+                  );
+                })}
             </div>
           </div>
 
@@ -2001,6 +2092,26 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             <hr style={{ borderColor: themeVars.borderCol, margin: '15px 0' }} />
 
             {SEQ_FIELDS.map(f => renderSeqTextField(f))}
+
+            <div className="row">
+              <label>Timeout Rollout:</label>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <input
+                  type="checkbox"
+                  checked={getGVar('timeout_autohide', true) === true || getGVar('timeout_autohide', true) === 'true'}
+                  onChange={(e) => updateGraphicVar('timeout_autohide', e.target.checked, true)}
+                  style={{ flex: 'none', width: 'auto' }}
+                />
+                <span style={{ fontSize: '12px' }}>Auto hide after</span>
+                <input
+                  type="number" min="1" max="300"
+                  value={getGVar('timeout_duration', '30')}
+                  onChange={(e) => updateGraphicVar('timeout_duration', e.target.value, true)}
+                  style={{ width: '60px', flex: 'none', textAlign: 'center' }}
+                />
+                <span style={{ fontSize: '12px' }}>secs</span>
+              </div>
+            </div>
           </div>
 
           <div className="box" style={{ flex: '2 1 600px', borderColor: '#007bff' }}>
@@ -2093,12 +2204,15 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                   <option value="homeGoal" style={selectStyle}>Home Goal Rollout Panel</option>
                   <option value="awaySog" style={selectStyle}>Away Shots on Goal</option>
                   <option value="homeSog" style={selectStyle}>Home Shots on Goal</option>
-                  <option value="ppPanel" style={selectStyle}>Power Play (Panel BG)</option>
+                  <option value="awayPP" style={selectStyle}>Away Power Play Panel</option>
+                  <option value="homePP" style={selectStyle}>Home Power Play Panel</option>
                   <option value="rollout1" style={selectStyle}>Rollout 1</option>
                   <option value="rollout2" style={selectStyle}>Rollout 2</option>
                   <option value="rollout3" style={selectStyle}>Rollout 3</option>
                   <option value="delayedPenalty" style={selectStyle}>Delayed Penalty</option>
-                  <option value="banner" style={selectStyle}>Full Width Banner</option>
+                  <option value="banner" style={selectStyle}>Full Width Banner 1</option>
+                  <option value="banner2" style={selectStyle}>Full Width Banner 2</option>
+                  <option value="banner3" style={selectStyle}>Full Width Banner 3</option>
                   <option value="shootout" style={selectStyle}>Shootout Tracker</option>
                 </select>
               </div>
@@ -2117,7 +2231,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                           onChange={(e) => updateGraphicVar(`${selectedComp}_autohide`, e.target.checked, true)}
                         />
                         <label htmlFor={`chk-autohide-${selectedComp}`} style={{ fontSize: '12px', cursor: 'pointer', fontWeight: 'bold' }}>
-                          Auto Hide {selectedComp === 'banner' ? 'Banner' : 'Rollout'}
+                          Auto Hide {selectedComp.startsWith('banner') ? 'Banner' : 'Rollout'}
                         </label>
                       </div>
 
@@ -2689,17 +2803,20 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                   </div>
                 </div>
 
-                {selectedComp === 'ppPanel' && (
+                {(selectedComp === 'awayPP' || selectedComp === 'homePP') && (
                   <div className="row" style={{ marginTop: '10px' }}>
                     <label>Team Logo BG:</label>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                       <input
                         type="checkbox"
-                        checked={getGVar('ppPanel_use_team_media', true) !== false && getGVar('ppPanel_use_team_media', true) !== 'false'}
-                        onChange={(e) => updateGraphicVar('ppPanel_use_team_media', e.target.checked, true)}
+                        checked={(() => {
+                          const v = getGVar(`${selectedComp}_use_team_media`, getGVar('ppPanel_use_team_media', true));
+                          return v !== false && v !== 'false';
+                        })()}
+                        onChange={(e) => updateGraphicVar(`${selectedComp}_use_team_media`, e.target.checked, true)}
                         style={{ flex: 'none', width: 'auto' }}
                       />
-                      <span style={{ fontSize: '11px' }}>Use the team box logo/video of the team on the power play (overrides the media above when that team has one)</span>
+                      <span style={{ fontSize: '11px' }}>Use this team's Team Box logo/video (overrides the media above when the team box has one). Scale, alpha and position here only affect this power play panel.</span>
                     </div>
                   </div>
                 )}
@@ -2839,7 +2956,9 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
               {renderHotkeyRow('Trigger Rollout 2:', 'triggerRollout2')}
               {renderHotkeyRow('Trigger Rollout 3:', 'triggerRollout3')}
               {renderHotkeyRow('Trigger Delayed Penalty:', 'triggerDelayedPenalty')}
-              {renderHotkeyRow('Trigger Banner:', 'triggerBanner')}
+              {renderHotkeyRow('Trigger Banner 1:', 'triggerBanner')}
+              {renderHotkeyRow('Trigger Banner 2:', 'triggerBanner2')}
+              {renderHotkeyRow('Trigger Banner 3:', 'triggerBanner3')}
             </div>
             <div className="box">
               <h3>AWAY TEAM</h3>
@@ -2847,6 +2966,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
               {renderHotkeyRow('-1 Goal:', 'subAwayGoal')}
               {renderHotkeyRow('+1 SOG:', 'addAwaySog')}
               {renderHotkeyRow('-1 SOG:', 'subAwaySog')}
+              {renderHotkeyRow('Timeout:', 'triggerAwayTimeout')}
+              {renderHotkeyRow('Delayed Penalty:', 'triggerAwayDelayed')}
             </div>
             <div className="box">
               <h3>HOME TEAM</h3>
@@ -2854,6 +2975,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
               {renderHotkeyRow('-1 Goal:', 'subHomeGoal')}
               {renderHotkeyRow('+1 SOG:', 'addHomeSog')}
               {renderHotkeyRow('-1 SOG:', 'subHomeSog')}
+              {renderHotkeyRow('Timeout:', 'triggerHomeTimeout')}
+              {renderHotkeyRow('Delayed Penalty:', 'triggerHomeDelayed')}
             </div>
           </div>
         </div>
