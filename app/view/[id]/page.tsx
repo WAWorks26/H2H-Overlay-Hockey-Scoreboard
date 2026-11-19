@@ -559,7 +559,7 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
   // cell with the visible (animated) one, so the panel is as wide as the longest
   // text and holds that width while shorter texts play.
   const renderPanelText = (spanKey: string, spanStyle: React.CSSProperties, content: React.ReactNode, sizers: string[]) => (
-    <span style={{ display: 'inline-grid', position: 'relative', zIndex: 3, flexShrink: 0, alignItems: 'center', ...(ppActive ? { fontVariantNumeric: 'tabular-nums' } : {}) }}>
+    <span style={{ display: 'inline-grid', position: 'relative', zIndex: 3, flexShrink: 0, alignItems: 'center', marginLeft: spanStyle.marginLeft, marginRight: spanStyle.marginRight, ...(ppActive ? { fontVariantNumeric: 'tabular-nums' } : {}) }}>
       {sizers.map((t, i) => (
         <span
           key={`sz_${i}`}
@@ -874,9 +874,21 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
   };
 
   // override lets a rollout sequence item use its own effect / speed
+  // Text Alignment (Component Editor). Auto margins move the text inside its flex/grid
+  // box whatever the box's own justify setting is; textAlign covers full-width text
+  // (banner). Unset = the layout's normal alignment.
+  const getTextAlignStyle = (compKey: string): React.CSSProperties => {
+    const a = getCompVar(compKey, 'text_align', '');
+    if (a === 'left') return { marginLeft: 0, marginRight: 'auto', textAlign: 'left' };
+    if (a === 'right') return { marginLeft: 'auto', marginRight: 0, textAlign: 'right' };
+    if (a === 'center') return { marginLeft: 'auto', marginRight: 'auto', textAlign: 'center' };
+    return {};
+  };
+
   const getTextAnimStyle = (compKey: string, override?: { anim?: string; dur?: string | number }) => {
+    const alignStyle = getTextAlignStyle(compKey);
     const animType = override?.anim ? override.anim : getCompVar(compKey, 'text_anim', 'none');
-    if (animType === 'none') return {};
+    if (animType === 'none') return alignStyle;
 
     const hasDurOverride = override?.dur !== undefined && override?.dur !== '' && !isNaN(parseFloat(String(override.dur)));
     const durVal = hasDurOverride ? parseFloat(String(override!.dur)) : parseFloat(getCompVar(compKey, 'text_anim_dur', '0.6'));
@@ -917,7 +929,7 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
     // any transform-based animation wiped the text skew out once it ran.
     animStyle['--text-skew'] = getTextSkewTransform(compKey);
 
-    return animStyle as React.CSSProperties;
+    return { ...alignStyle, ...animStyle } as React.CSSProperties;
   };
 
   const userSkew = gc.skewAngle ? `${gc.skewAngle}deg` : null;
@@ -1053,7 +1065,7 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
                   <div id="away-team-box-wrapper" style={{ padding: '12px 28px', ...getCompStyle('awayTeam', state.away_color || '#00468b', '#ffffff', 32), fontWeight: 'bold', flexDirection: 'column', minWidth: '180px', position: 'relative' }}>
                     {renderCompLayers('awayTeam', state.away_color || '#00468b')}
                     <span style={{ position: 'relative', zIndex: 3, transform: getTextSkewTransform('awayTeam'), paddingRight: '8px', whiteSpace: 'nowrap', ...getTextAnimStyle('awayTeam') }}>{state.away_name}</span>
-                    <span style={{ fontSize: '11px', background: 'rgba(0,0,0,0.5)', padding: '2px 8px', borderRadius: '10px', marginTop: '2px', position: 'relative', zIndex: 3, transform: getTextSkewTransform('awayTeam') }}>SOG: {state.away_sog}</span>
+                    <span style={{ fontSize: '11px', background: 'rgba(0,0,0,0.5)', padding: '2px 8px', borderRadius: '10px', marginTop: '2px', position: 'relative', zIndex: 3, transform: getTextSkewTransform('awayTeam'), ...getTextAlignStyle('awayTeam') }}>SOG: {state.away_sog}</span>
                     
                     {awayPens.length > 0 && (
                       <div style={{ position: 'absolute', top: '100%', left: 0, width: '100%', marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '4px', zIndex: 10 }}>
@@ -1075,7 +1087,7 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
                   <div id="home-team-box-wrapper" style={{ padding: '12px 28px', ...getCompStyle('homeTeam', state.home_color || '#111111', '#ffffff', 32), fontWeight: 'bold', flexDirection: 'column', minWidth: '180px', position: 'relative' }}>
                     {renderCompLayers('homeTeam', state.home_color || '#111111')}
                     <span style={{ position: 'relative', zIndex: 3, transform: getTextSkewTransform('homeTeam'), paddingRight: '8px', whiteSpace: 'nowrap', ...getTextAnimStyle('homeTeam') }}>{state.home_name}</span>
-                    <span style={{ fontSize: '11px', background: 'rgba(0,0,0,0.5)', padding: '2px 8px', borderRadius: '10px', marginTop: '2px', position: 'relative', zIndex: 3, transform: getTextSkewTransform('homeTeam') }}>SOG: {state.home_sog}</span>
+                    <span style={{ fontSize: '11px', background: 'rgba(0,0,0,0.5)', padding: '2px 8px', borderRadius: '10px', marginTop: '2px', position: 'relative', zIndex: 3, transform: getTextSkewTransform('homeTeam'), ...getTextAlignStyle('homeTeam') }}>SOG: {state.home_sog}</span>
 
                     {homePens.length > 0 && (
                       <div style={{ position: 'absolute', top: '100%', left: 0, width: '100%', marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '4px', zIndex: 10 }}>

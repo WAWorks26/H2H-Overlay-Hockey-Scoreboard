@@ -48,6 +48,16 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
   const isHistoryAction = useRef(false);
 
   const [autoSaveEnabled, setAutoSaveEnabled] = useState(false);
+
+  // Penalty entry form
+  const [penTeam, setPenTeam] = useState<'away' | 'home'>('away');
+  const [penPlyr, setPenPlyr] = useState('');
+  const [penMin, setPenMin] = useState('2');
+  const [penSec, setPenSec] = useState('00');
+
+  // When the current side rollout auto-hides (for the preview countdown)
+  const [rolloutEnds, setRolloutEnds] = useState<{ mode: string; at: number } | null>(null);
+  const [nowTick, setNowTick] = useState(Date.now());
   const [autoSaveIntervalSec, setAutoSaveIntervalSec] = useState(15);
   const [periodLengthMin, setPeriodLengthMin] = useState(20);
 
@@ -691,6 +701,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
       penalties: currentState.penalties
     }).eq('id', id).then();
 
+    setRolloutEnds(modeName !== 'none' && shouldAutoHide ? { mode: modeName, at: Date.now() + duration * 1000 } : null);
+
     if (modeName !== 'none' && shouldAutoHide) {
       rolloutTimerRef.current = setTimeout(() => {
         // only hide if this rollout is still the one showing
@@ -868,21 +880,35 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
   }, []);
 
   const addPenalty = async () => {
-    const team = (document.getElementById('sel-pen-team') as HTMLSelectElement).value;
-    const plyr = (document.getElementById('inp-pen-plyr') as HTMLInputElement).value || "00";
-    const min = parseInt((document.getElementById('inp-pen-min') as HTMLInputElement).value) || 0;
-    const sec = parseInt((document.getElementById('inp-pen-sec') as HTMLInputElement).value) || 0;
+    const plyr = penPlyr.trim() || "00";
+    const min = parseInt(penMin) || 0;
+    const sec = Math.min(59, parseInt(penSec) || 0);
     const time = (min * 60) + sec;
     
     if (time > 0) {
       const currentState = stateRef.current;
       if (!currentState) return;
 
-      const newPenalties = [...(currentState.penalties || []), { id: Date.now(), team, plyr, time }];
+      const newPenalties = [...(currentState.penalties || []), { id: Date.now(), team: penTeam, plyr, time }];
       updateField('penalties', newPenalties);
-      (document.getElementById('inp-pen-plyr') as HTMLInputElement).value = '';
+      setPenPlyr('');
+      // back to the player # field, ready for the next penalty
+      setTimeout(() => (document.getElementById('inp-pen-plyr') as HTMLInputElement | null)?.focus(), 0);
     }
   };
+
+  // Hide whatever side rollout (timeout, delayed penalty, goal, rollout) is showing
+  const hideSideRollout = () => {
+    if (rolloutTimerRef.current) { clearTimeout(rolloutTimerRef.current); rolloutTimerRef.current = null; }
+    setRolloutEnds(null);
+    updateField('right_panel_mode', 'none');
+  };
+
+  useEffect(() => {
+    if (!state || state.right_panel_mode === 'none' || !rolloutEnds) return;
+    const t = setInterval(() => setNowTick(Date.now()), 250);
+    return () => clearInterval(t);
+  }, [state?.right_panel_mode, rolloutEnds]);
 
   const removePenalty = async (penId: number) => {
     const currentState = stateRef.current;
@@ -1674,6 +1700,67 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             </div>
 
           </div>
+
+          {/* ON AIR: what the overlay is showing besides the bug */}
+          {(() => {
+            const mode = state.right_panel_mode || 'none';
+            const pens = state.penalties || [];
+            const awayN = pens.filter((p: Penalty) => p.team === 'away').length;
+            const homeN = pens.filter((p: Penalty) => p.team === 'home').length;
+            const teamOf = (m: string) => m.startsWith('away') ? 'away' : m.startsWith('home') ? 'home' : '';
+            const teamName = (t: string) => t === 'away' ? (state.away_name || 'AWAY') : t === 'home' ? (state.home_name || 'HOME') : '';
+            const teamColor = (t: string) => t === 'away' ? (state.away_color || '#00468b') : t === 'home' ? (state.home_color || '#222222') : '#555';
+            const fill = (txt: string, t: string) => String(txt || '').replace(/{TEAM}/g, teamName(t)).replace(/\s{2,}/g, ' ').trim();
+
+            let side: { label: string; text: string; color: string; hideable: boolean } | null = null;
+            const t = teamOf(mode);
+            if (mode === 'awayTimeout' || mode === 'homeTimeout') {
+              side = { label: 'TIMEOUT', text: fill(getGVar('timeout_text', 'TIMEOUT {TEAM}'), t), color: teamColor(t), hideable: true };
+            } else if (mode === 'awayDelayed' || mode === 'homeDelayed' || mode === 'delayedPenalty') {
+              side = { label: 'DELAYED PENALTY', text: fill(getGVar('delayedPenalty_text', 'DELAYED PENALTY'), t) + (t ? ` · ${teamName(t)}` : ''), color: t ? teamColor(t) : '#c0392b', hideable: true };
+            } else if (mode === 'awayGoal' || mode === 'homeGoal') {
+              side = { label: 'GOAL', text: fill(getGVar('goal_text_format', 'GOAL {TEAM}'), t), color: teamColor(t), hideable: true };
+            } else if (mode.startsWith('rollout')) {
+              side = { label: `ROLLOUT ${mode.slice(7)}`, text: state.right_panel_text || '', color: '#1e5bb8', hideable: true };
+            } else if (mode === 'none' && awayN !== homeN) {
+              const ppT = homeN > awayN ? 'away' : 'home';
+              const shorthanded = pens.filter((p: Penalty) => p.team !== ppT);
+              const lowest = Math.min(...shorthanded.map((p: Penalty) => p.time));
+              side = { label: 'POWER PLAY', text: `${teamName(ppT)} · ${5 - awayN} VS ${5 - homeN} · ${formatTime(lowest)}`, color: teamColor(ppT), hideable: false };
+            }
+
+            const remaining = side && rolloutEnds && rolloutEnds.mode === mode
+              ? Math.max(0, Math.ceil((rolloutEnds.at - nowTick) / 1000)) : null;
+            const bannerKey = getGVar('active_banner', 'banner');
+            const bannerN = bannerKey === 'banner' ? 1 : parseInt(bannerKey.replace('banner', '')) || 1;
+
+            return (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginTop: '8px', minHeight: '30px' }}>
+                <span style={{ fontSize: '10px', fontWeight: 'bold', letterSpacing: '0.5px', color: themeVars.textMuted }}>ON AIR:</span>
+                {!side && !state.banner_active && (
+                  <span style={{ fontSize: '11px', color: themeVars.textMuted }}>Scoreboard only</span>
+                )}
+                {side && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: side.color, color: '#fff', borderRadius: '6px', padding: '4px 6px 4px 10px', fontSize: '12px', fontWeight: 'bold', boxShadow: '0 1px 3px rgba(0,0,0,0.3)' }}>
+                    <span style={{ fontSize: '9px', background: 'rgba(0,0,0,0.35)', padding: '2px 6px', borderRadius: '3px', letterSpacing: '0.5px' }}>{side.label}</span>
+                    <span style={{ whiteSpace: 'nowrap' }}>{side.text}</span>
+                    {remaining !== null && (
+                      <span style={{ fontFamily: 'monospace', fontSize: '13px', background: 'rgba(0,0,0,0.35)', padding: '1px 6px', borderRadius: '3px' }}>{formatTime(remaining)}</span>
+                    )}
+                    {side.hideable && (
+                      <button onClick={hideSideRollout} title="Hide this rollout" style={{ background: 'rgba(255,255,255,0.2)', color: '#fff', border: 'none', borderRadius: '4px', padding: '2px 8px', fontSize: '10px', fontWeight: 'bold', cursor: 'pointer' }}>HIDE</button>
+                    )}
+                  </div>
+                )}
+                {state.banner_active && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: '#6f42c1', color: '#fff', borderRadius: '6px', padding: '4px 10px', fontSize: '12px', fontWeight: 'bold' }}>
+                    <span style={{ fontSize: '9px', background: 'rgba(0,0,0,0.35)', padding: '2px 6px', borderRadius: '3px' }}>BANNER {bannerN}</span>
+                    <span style={{ whiteSpace: 'nowrap' }}>{state.banner_text}</span>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </div>
 
         <div className="panel-grid">
@@ -1789,12 +1876,71 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
 
           <div className="box">
             <h3>PENALTIES & ROLLOUTS</h3>
-            <div className="row">
-                <select id="sel-pen-team" style={{ width: '75px', flex: 'none', ...selectStyle }}><option value="away" style={selectStyle}>Away</option><option value="home" style={selectStyle}>Home</option></select>
-                <input type="text" id="inp-pen-plyr" placeholder="Plyr #" style={{ width: '60px', flex: 'none' }} />
-                <input type="number" id="inp-pen-min" defaultValue="2" min="0" style={{ width: '50px', flex: 'none' }} /> : 
-                <input type="number" id="inp-pen-sec" defaultValue="00" min="0" max="59" style={{ width: '50px', flex: 'none' }} />
-                <button className="btn btn-red" style={{ borderRadius: '6px' }} onClick={addPenalty}>ADD</button>
+            {/* 1. Team  2. Player #  3. ADD  (penalty length sits after the button so the
+                 player number can't be typed into the time by mistake) */}
+            <div style={{ background: themeVars.bgInput, border: `1px solid ${themeVars.borderCol}`, borderRadius: '8px', padding: '10px', marginBottom: '10px' }}>
+              <div style={{ display: 'flex', gap: '6px', marginBottom: '8px' }}>
+                {(['away', 'home'] as const).map(t => {
+                  const on = penTeam === t;
+                  const col = t === 'away' ? (state.away_color || '#00468b') : (state.home_color || '#222222');
+                  return (
+                    <button
+                      key={`pen_team_${t}`}
+                      type="button"
+                      onClick={() => setPenTeam(t)}
+                      style={{
+                        flex: 1, padding: '8px 6px', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', fontSize: '12px',
+                        background: on ? col : 'transparent', color: on ? '#fff' : themeVars.textColor,
+                        border: on ? `2px solid ${col}` : `2px solid ${themeVars.borderCol}`,
+                        boxShadow: on ? '0 0 0 2px rgba(255,255,255,0.15) inset' : 'none',
+                      }}
+                    >
+                      {(t === 'away' ? state.away_name : state.home_name) || t.toUpperCase()}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'stretch', gap: '6px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', background: '#FFD54A', borderRadius: '6px', padding: '0 4px 0 10px', flex: 1, border: '2px solid #E0A800' }}>
+                  <span style={{ color: '#3a2a00', fontWeight: 900, fontSize: '18px' }}>#</span>
+                  <input
+                    type="text"
+                    id="inp-pen-plyr"
+                    inputMode="numeric"
+                    placeholder="Player"
+                    value={penPlyr}
+                    onChange={(e) => setPenPlyr(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addPenalty(); } }}
+                    style={{ flex: 1, minWidth: 0, background: 'transparent', border: 'none', outline: 'none', color: '#1a1a1a', fontWeight: 900, fontSize: '20px', padding: '6px 6px', boxShadow: 'none' }}
+                  />
+                </div>
+                <button className="btn btn-red" style={{ borderRadius: '6px', flex: 'none', padding: '0 16px', fontWeight: 'bold' }} onClick={addPenalty} title="Add penalty (or press Enter in the player # field)">
+                  + ADD PENALTY
+                </button>
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '8px', flexWrap: 'wrap' }}>
+                <span style={{ fontSize: '11px', fontWeight: 'bold', color: themeVars.textMuted }}>LENGTH:</span>
+                {[['2', '00'], ['4', '00'], ['5', '00'], ['10', '00']].map(([m, sc]) => {
+                  const on = String(parseInt(penMin) || 0) === m && (parseInt(penSec) || 0) === 0;
+                  return (
+                    <button
+                      key={`pen_len_${m}`}
+                      type="button"
+                      tabIndex={-1}
+                      onClick={() => { setPenMin(m); setPenSec(sc); }}
+                      style={{ padding: '4px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer',
+                        background: on ? '#007bff' : 'transparent', color: on ? '#fff' : themeVars.textColor, border: `1px solid ${on ? '#007bff' : themeVars.borderCol}` }}
+                    >
+                      {m}:00
+                    </button>
+                  );
+                })}
+                <input type="number" id="inp-pen-min" tabIndex={-1} value={penMin} min="0" onChange={(e) => setPenMin(e.target.value)} style={{ width: '46px', flex: 'none', textAlign: 'center', marginLeft: 'auto' }} />
+                <span style={{ fontWeight: 'bold' }}>:</span>
+                <input type="number" id="inp-pen-sec" tabIndex={-1} value={penSec} min="0" max="59" onChange={(e) => setPenSec(e.target.value)} style={{ width: '46px', flex: 'none', textAlign: 'center' }} />
+              </div>
             </div>
             <div className="row"><button className="btn btn-orange" style={{ borderRadius: '6px' }} onClick={() => updateField('penalties', [])}>CLEAR ALL PENALTIES</button></div>
             
@@ -2339,6 +2485,29 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                       onChange={(e) => updateGraphicVar(`${selectedComp}_font_size`, e.target.value)} 
                       style={{ width: '55px', height: '32px', textAlign: 'center' }}
                     />
+                  </div>
+                </div>
+
+                <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+                  <label>Text Alignment:</label>
+                  <div style={{ display: 'flex', gap: '4px' }}>
+                    {[['', 'Default'], ['left', 'Left'], ['center', 'Center'], ['right', 'Right']].map(([v, label]) => {
+                      const cur = getGVar(`${selectedComp}_text_align`, '') || '';
+                      const on = cur === v;
+                      return (
+                        <button
+                          key={`align_${v || 'default'}`}
+                          type="button"
+                          title={v ? `Align text ${v}` : 'Use the layout\'s normal alignment'}
+                          onClick={() => updateGraphicVar(`${selectedComp}_text_align`, v, true)}
+                          style={{ padding: '6px 10px', borderRadius: '4px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer',
+                            background: on ? '#007bff' : themeVars.btnSecondaryBg, color: on ? '#fff' : themeVars.btnSecondaryText,
+                            border: `1px solid ${on ? '#007bff' : themeVars.btnSecondaryBorder}` }}
+                        >
+                          {label}
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
 
