@@ -27,6 +27,7 @@ const seqKeyForMode = (mode: string) =>
   mode.startsWith('rollout') ? mode :
   (mode === 'delayedPenalty' || mode === 'awayDelayed' || mode === 'homeDelayed') ? 'delayedPenalty' :
   (mode === 'awayTimeout' || mode === 'homeTimeout') ? 'timeout' :
+  mode === 'fourOnFour' ? 'fourOnFour' :
   (mode === 'awayGoal' || mode === 'homeGoal' || mode === 'goal') ? 'goal' : '';
 
 const resolveSeq = (gc: Record<string, any>, seqKey: string, teamName?: string): RolloutSeqItem[] => {
@@ -89,7 +90,7 @@ function useTextSequence(items: RolloutSeqItem[], loop: boolean, activeKey: stri
 // the network: no buffering on a weak rink connection, and an OBS restart reloads
 // the media from disk instead of downloading it again.
 const MEDIA_CACHE_NAME = 'h2h-media-v1';
-const MEDIA_KEYS = ['awayGoal', 'homeGoal', 'goal', 'ppPanel', 'awayPP', 'homePP', 'delayedPenalty', 'rollout1', 'rollout2', 'rollout3', 'banner', 'banner2', 'banner3', 'awayTeam', 'homeTeam', 'clock', 'period'];
+const MEDIA_KEYS = ['awayGoal', 'homeGoal', 'goal', 'ppPanel', 'awayPP', 'homePP', 'delayedPenalty', 'fourOnFour', 'rollout1', 'rollout2', 'rollout3', 'banner', 'banner2', 'banner3', 'awayTeam', 'homeTeam', 'clock', 'period'];
 const blobUrlCache = new Map<string, string>();          // remote URL -> blob: URL
 const blobLoads = new Map<string, Promise<string>>();    // in-flight downloads
 
@@ -142,6 +143,7 @@ const resolveMedia = (gc: Record<string, any>, key: string): { url: string; isVi
   // Timeouts draw with the team's power play panel, which falls back to the team logo
   if (key === 'awayTimeout' || key === 'homeTimeout') return resolveMedia(gc, key === 'awayTimeout' ? 'awayPP' : 'homePP');
   if (key === 'awayDelayed' || key === 'homeDelayed') return resolveMedia(gc, 'delayedPenalty');
+  if (key === 'fourOnFour') return resolveMedia(gc, 'delayedPenalty'); // no own media: same look as delayed penalty
   if (key === 'awayPP' || key === 'homePP') {
     const useTeam = gc?.[`${key}_use_team_media`] ?? gc?.ppPanel_use_team_media;
     const team = key === 'awayPP' ? 'awayTeam' : 'homeTeam';
@@ -502,28 +504,34 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
   const isRollout = currentMode.startsWith('rollout');
   const isDelayed = currentMode === 'delayedPenalty' || currentMode === 'awayDelayed' || currentMode === 'homeDelayed';
   const isTimeout = currentMode === 'awayTimeout' || currentMode === 'homeTimeout';
+  const isFourOnFour = currentMode === 'fourOnFour';
   const isAwayGoal = currentMode === 'awayGoal';
   const isHomeGoal = currentMode === 'homeGoal';
   const isGoal = isAwayGoal || isHomeGoal || currentMode === 'goal';
 
-  const showRightPanel = isRollout || isDelayed || isTimeout || ppActive || isGoal || panelExiting;
+  const showRightPanel = isRollout || isDelayed || isTimeout || isFourOnFour || ppActive || isGoal || panelExiting;
 
   // Current side-panel text: sequence item if one is configured, else the plain text.
-  const panelHasText = isRollout || isGoal || isDelayed || isTimeout;
+  const panelHasText = isRollout || isGoal || isDelayed || isTimeout || isFourOnFour;
   const basePanelText = (
     isDelayed ? (gc.delayedPenalty_text || 'DELAYED PENALTY') :
     isTimeout ? (gc.timeout_text || 'TIMEOUT {TEAM}') :
+    isFourOnFour ? (gc.fourOnFour_text || '4 ON 4') :
     (displayedPanelText || state.right_panel_text || '')
   ).replace(/{TEAM}/g, goalTeam ?? '').replace(/\s{2,}/g, ' ').trim();
   const activeSeqItem = panelHasText && panelSeqItems.length > 0 ? panelSeqItems[panelSeq.index] : null;
-  const panelText = activeSeqItem ? activeSeqItem.text : basePanelText;
+  // {TIME} = shortest penalty still running (live). Keys below use the unfilled text,
+  // so the countdown doesn't replay the text animation every second.
+  const shortestPen = (state.penalties || []).length > 0 ? Math.min(...(state.penalties || []).map(p => p.time)) : 0;
+  const fillTime = (t: string) => t.includes('{TIME}') ? t.replace(/{TIME}/g, shortestPen > 0 ? formatTime(shortestPen) : '') : t;
+  const panelText = fillTime(activeSeqItem ? activeSeqItem.text : basePanelText);
   const panelTextKey = activeSeqItem
     ? `seq_${panelSeq.index}_${panelSeq.cycle}_${activeSeqItem.text}`
     : `${basePanelText}`;
   const panelAnimOverride = activeSeqItem ? { anim: activeSeqItem.anim, dur: activeSeqItem.animDur } : undefined;
   // Every text the panel may show; the panel is sized to the longest so it never shrinks mid-sequence.
   const panelSizerTexts: string[] = panelHasText
-    ? (panelSeqItems.length > 0 ? panelSeqItems.map(it => it.text) : [basePanelText])
+    ? (panelSeqItems.length > 0 ? panelSeqItems.map(it => fillTime(it.text)) : [fillTime(basePanelText)])
     : [];
 
   // Banner text (sequence-aware)
@@ -579,6 +587,7 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
     isHomeGoal ? 'homeGoal' :
     isGoal ? 'goal' :
     isDelayed ? 'delayedPenalty' :
+    isFourOnFour ? 'fourOnFour' :
     currentMode === 'awayTimeout' ? 'awayPP' :
     currentMode === 'homeTimeout' ? 'homePP' :
     isRollout ? currentMode : 'rollout1';
@@ -614,6 +623,11 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
 
     const directVal = gc[`${compKey}_${propSuffix}`];
 
+    // 4 on 4 panel looks like the Delayed Penalty panel until it is customised
+    if (compKey === 'fourOnFour' && (directVal === undefined || directVal === '') && propSuffix !== 'text') {
+      const dp = gc[`delayedPenalty_${propSuffix}`];
+      if (dp !== undefined && dp !== '') return dp;
+    }
     if ((compKey === 'banner2' || compKey === 'banner3') && (directVal === undefined || directVal === '')
         && !['media_url', 'is_video', 'text'].includes(propSuffix)) {
       const b1 = gc[`banner_${propSuffix}`];

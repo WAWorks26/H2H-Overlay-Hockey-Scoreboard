@@ -28,7 +28,7 @@ const DEFAULT_HOTKEYS: Record<string, string> = {
   triggerRollout3: 'Digit3', triggerDelayedPenalty: 'KeyD', triggerBanner: 'KeyB', triggerBanner2: '', triggerBanner3: '',
   addAwayGoal: 'KeyA', subAwayGoal: 'KeyZ', addAwaySog: 'KeyS', subAwaySog: '', addAwayPenalty: '',
   addHomeGoal: 'KeyH', subHomeGoal: 'KeyN', addHomeSog: 'KeyJ', subHomeSog: '', addHomePenalty: '',
-  triggerAwayTimeout: '', triggerHomeTimeout: '', triggerAwayDelayed: '', triggerHomeDelayed: '',
+  triggerAwayTimeout: '', triggerHomeTimeout: '', triggerAwayDelayed: '', triggerHomeDelayed: '', triggerFourOnFour: '',
 };
 
 export default function ControlPanelPage({ params }: { params: Promise<{ id: string }> }) {
@@ -48,6 +48,16 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
   const isHistoryAction = useRef(false);
 
   const [autoSaveEnabled, setAutoSaveEnabled] = useState(false);
+
+  // Game Ops: widths of the Clock | Team | Penalty columns (fr units, draggable dividers)
+  const [opsCols, setOpsCols] = useState<number[]>(() => {
+    try {
+      const v = JSON.parse(localStorage.getItem('h2h_ops_cols') || 'null');
+      if (Array.isArray(v) && v.length === 3 && v.every((n: any) => typeof n === 'number' && n > 0)) return v;
+    } catch { /* storage unavailable */ }
+    return [1, 1, 1];
+  });
+  const opsColsRef = useRef<HTMLDivElement | null>(null);
 
   // Penalty entry form
   const [penTeam, setPenTeam] = useState<'away' | 'home'>('away');
@@ -711,6 +721,19 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     }
   };
 
+  // 4 on 4 side rollout (toggle). Graphics follow the Delayed Penalty panel until customised.
+  const triggerFourOnFour = () => {
+    const currentState = stateRef.current;
+    if (!currentState) return;
+    if (currentState.right_panel_mode === 'fourOnFour') {
+      if (rolloutTimerRef.current) clearTimeout(rolloutTimerRef.current);
+      setRolloutEnds(null);
+      updateField('right_panel_mode', 'none');
+      return;
+    }
+    triggerRolloutWithAutoHide('fourOnFour', getRefGVar('fourOnFour_text', '4 ON 4'), 'fourOnFour', 10);
+  };
+
   // Per-team side rollouts. Pressing the showing one again hides it; pressing another swaps.
   //  Timeout:         awayTimeout / homeTimeout - drawn with that team's Power Play panel graphics
   //  Delayed penalty: awayDelayed / homeDelayed - drawn with the Delayed Penalty graphics
@@ -857,6 +880,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
         case 'triggerHomeTimeout': triggerTeamRollout('timeout', 'home'); break;
         case 'triggerAwayDelayed': triggerTeamRollout('delayed', 'away'); break;
         case 'triggerHomeDelayed': triggerTeamRollout('delayed', 'home'); break;
+        case 'triggerFourOnFour': triggerFourOnFour(); break;
         case 'triggerBanner2': triggerBanner(2); break;
         case 'triggerBanner3': triggerBanner(3); break;
         case 'addAwayGoal': adjStat('away', 'score', 1); break;
@@ -895,6 +919,61 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
       // back to the player # field, ready for the next penalty
       setTimeout(() => (document.getElementById('inp-pen-plyr') as HTMLInputElement | null)?.focus(), 0);
     }
+  };
+
+  const saveOpsCols = (v: number[]) => {
+    setOpsCols(v);
+    try { localStorage.setItem('h2h_ops_cols', JSON.stringify(v)); } catch { /* ignore */ }
+  };
+
+  // Drag the divider between column i and i+1
+  const startColResize = (i: number) => (e: React.PointerEvent<HTMLDivElement>) => {
+    const box = opsColsRef.current;
+    if (!box) return;
+    e.preventDefault();
+    const startX = e.clientX;
+    const start = [...opsCols];
+    const total = start.reduce((a, b) => a + b, 0);
+    const usable = box.getBoundingClientRect().width - 2 * 14; // minus the two dividers
+    const minFr = total * 0.18;                                  // each column keeps >= 18%
+    let latest = start;
+    const move = (ev: PointerEvent) => {
+      const dFr = ((ev.clientX - startX) / usable) * total;
+      const pair = start[i] + start[i + 1];
+      const left = Math.min(pair - minFr, Math.max(minFr, start[i] + dFr));
+      latest = [...start];
+      latest[i] = left;
+      latest[i + 1] = pair - left;
+      setOpsCols(latest);
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      saveOpsCols(latest);
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
+
+  const renderColHandle = (i: number) => (
+    <div
+      className="ops-col-handle"
+      title="Drag to resize columns · double-click to reset"
+      onPointerDown={startColResize(i)}
+      onDoubleClick={() => saveOpsCols([1, 1, 1])}
+      style={{ cursor: 'col-resize', display: 'flex', alignItems: 'center', justifyContent: 'center', touchAction: 'none' }}
+    >
+      <div style={{ width: '4px', height: '48px', borderRadius: '4px', background: themeVars.borderCol, opacity: 0.9 }} />
+    </div>
+  );
+
+  const penRowBtn: React.CSSProperties = {
+    borderRadius: '6px', flex: '1 1 0', minWidth: 0, width: 'auto', margin: 0, padding: '0 4px',
+    fontWeight: 'bold', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', boxSizing: 'border-box', minHeight: '40px',
   };
 
   // Hide whatever side rollout (timeout, delayed penalty, goal, rollout) is showing
@@ -1194,7 +1273,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     borderColor: themeVars.borderCol
   };
 
-  const isRolloutElement = ['rollout1', 'rollout2', 'rollout3', 'awayGoal', 'homeGoal', 'delayedPenalty', 'banner', 'banner2', 'banner3'].includes(selectedComp);
+  const isRolloutElement = ['rollout1', 'rollout2', 'rollout3', 'awayGoal', 'homeGoal', 'delayedPenalty', 'fourOnFour', 'banner', 'banner2', 'banner3'].includes(selectedComp);
 
   // ---------- Text sequences (rollouts, goals, delayed penalty, banner) ----------
   // Every rollout-style text field can hold a sequence of texts. The sequence is
@@ -1216,6 +1295,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     { seqKey: 'rollout2', label: 'Rollout 2 Text:', textKey: 'rollout2_text', defaultText: 'ROLLOUT 2', durationKeys: ['rollout2_duration'], displayName: 'Rollout 2' },
     { seqKey: 'rollout3', label: 'Rollout 3 Text:', textKey: 'rollout3_text', defaultText: 'ROLLOUT 3', durationKeys: ['rollout3_duration'], displayName: 'Rollout 3' },
     { seqKey: 'delayedPenalty', label: 'Delayed Penalty Text:', textKey: 'delayedPenalty_text', defaultText: 'DELAYED PENALTY', durationKeys: ['delayedPenalty_duration'], displayName: 'the Delayed Penalty rollout', hint: 'Used by the Away / Home DELAYED PEN buttons. {TEAM} is replaced with the penalized team name.' },
+    { seqKey: 'fourOnFour', label: '4 on 4 Text:', textKey: 'fourOnFour_text', defaultText: '4 ON 4', durationKeys: ['fourOnFour_duration'], displayName: 'the 4 on 4 rollout', hint: '{TIME} = shortest penalty time remaining (live), e.g. "4 ON 4 {TIME}".' },
     { seqKey: 'timeout', label: 'Timeout Text:', textKey: 'timeout_text', defaultText: 'TIMEOUT {TEAM}', durationKeys: ['timeout_duration'], displayName: 'the Timeout rollout', hint: '{TEAM} is replaced with the team that called the timeout. Graphics come from that team\'s Power Play panel.' },
     { seqKey: 'ppPanel', label: 'Power Play Text:', textKey: 'ppPanel_text', defaultText: '{TEAM} PP {TIME}', durationKeys: [], displayName: 'the Power Play panel', hint: 'Placeholders: {TEAM} = team on the power play, {TIME} = PP time remaining (live), {SITUATION} = e.g. 5 VS 4. The PP panel stays up for the whole power play.' },
     { seqKey: 'banner', label: 'Banner 1 Text:', textKey: 'banner_text', defaultText: 'FULL WIDTH BANNER', durationKeys: ['banner_duration'], displayName: 'Banner 1' },
@@ -1440,6 +1520,12 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
         #control-panel .box { background-color: ${themeVars.bgBox} !important; border-color: ${themeVars.borderCol} !important; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
         #control-panel .box h3, #control-panel .box label { color: ${themeVars.headerTextCol} !important; }
         #control-panel input, #control-panel select { background-color: ${themeVars.bgInput} !important; color: ${themeVars.textColor} !important; border-color: ${themeVars.borderCol} !important; }
+        #control-panel .ops-cols > .box { min-width: 0; margin: 0; }
+        #control-panel .ops-col-handle:hover > div { background: #007bff !important; }
+        @media (max-width: 900px) {
+          #control-panel .ops-cols { grid-template-columns: minmax(0, 1fr) !important; row-gap: 15px; }
+          #control-panel .ops-col-handle { display: none !important; }
+        }
         #control-panel #inp-pen-plyr { background: transparent !important; background-color: transparent !important; color: #1a1a1a !important; border: none !important; box-shadow: none !important; }
         #control-panel #inp-pen-plyr::placeholder { color: rgba(58,42,0,0.55) !important; }
         #control-panel .tab-headers { background-color: ${themeVars.tabHeaderBg} !important; border-bottom-color: ${themeVars.borderCol} !important; }
@@ -1722,6 +1808,9 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
               side = { label: 'DELAYED PENALTY', text: fill(getGVar('delayedPenalty_text', 'DELAYED PENALTY'), t) + (t ? ` · ${teamName(t)}` : ''), color: t ? teamColor(t) : '#c0392b', hideable: true };
             } else if (mode === 'awayGoal' || mode === 'homeGoal') {
               side = { label: 'GOAL', text: fill(getGVar('goal_text_format', 'GOAL {TEAM}'), t), color: teamColor(t), hideable: true };
+            } else if (mode === 'fourOnFour') {
+              const sp = pens.length > 0 ? Math.min(...pens.map((p: Penalty) => p.time)) : 0;
+              side = { label: '4 ON 4', text: String(getGVar('fourOnFour_text', '4 ON 4')).replace(/{TIME}/g, sp > 0 ? formatTime(sp) : '').trim(), color: '#5a6270', hideable: true };
             } else if (mode.startsWith('rollout')) {
               side = { label: `ROLLOUT ${mode.slice(7)}`, text: state.right_panel_text || '', color: '#1e5bb8', hideable: true };
             } else if (mode === 'none' && awayN !== homeN) {
@@ -1766,6 +1855,16 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
         </div>
 
         <div className="panel-grid">
+
+          {/* Clock | Team | Penalties: three columns, drag the dividers to resize */}
+          <div
+            ref={opsColsRef}
+            className="ops-cols"
+            style={{
+              flex: '1 1 100%', display: 'grid', alignItems: 'stretch', minWidth: 0,
+              gridTemplateColumns: `minmax(0, ${opsCols[0]}fr) 14px minmax(0, ${opsCols[1]}fr) 14px minmax(0, ${opsCols[2]}fr)`,
+            }}
+          >
           
           <div className="box">
             <button 
@@ -1845,6 +1944,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             </div>
           </div>
 
+          {renderColHandle(0)}
+
           <div className="box" style={{ 
             flex: '2 1 450px',
             padding: '16px', 
@@ -1903,6 +2004,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             </div>
           </div>
 
+          {renderColHandle(1)}
+
           <div className="box">
             <h3>PENALTIES & ROLLOUTS</h3>
             {/* 1. Team  2. Player #  3. ADD  (penalty length sits after the button so the
@@ -1931,7 +2034,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
               </div>
 
               <div style={{ display: 'flex', alignItems: 'stretch', gap: '6px', width: '100%', boxSizing: 'border-box' }}>
-                <div style={{ display: 'flex', alignItems: 'center', background: '#FFD54A', borderRadius: '6px', padding: '0 4px 0 10px', flex: '0 0 calc(50% - 3px)', minWidth: 0, boxSizing: 'border-box', border: '2px solid #E0A800' }}>
+                <div style={{ display: 'flex', alignItems: 'center', background: '#FFD54A', borderRadius: '6px', padding: '0 4px 0 8px', flex: '1.3 1 0', minWidth: '70px', boxSizing: 'border-box', border: '2px solid #E0A800' }}>
                   <span style={{ color: '#3a2a00', fontWeight: 900, fontSize: '18px' }}>#</span>
                   <input
                     type="text"
@@ -1944,8 +2047,24 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                     style={{ flex: 1, minWidth: 0, background: 'transparent', border: 'none', outline: 'none', color: '#1a1a1a', fontWeight: 900, fontSize: '20px', padding: '6px 6px', boxShadow: 'none' }}
                   />
                 </div>
-                <button className="btn btn-red" style={{ borderRadius: '6px', flex: '1 1 0', minWidth: 0, width: 'auto', margin: 0, padding: '0 8px', fontWeight: 'bold', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', boxSizing: 'border-box' }} onClick={addPenalty} title="Add penalty (or press Enter in the player # field)">
-                  + ADD PENALTY
+                <button className="btn btn-red" style={penRowBtn} onClick={addPenalty} title="Add penalty (or press Enter in the player # field)">
+                  + ADD
+                </button>
+                <button
+                  className="btn btn-orange"
+                  style={{ ...penRowBtn, outline: state.right_panel_mode === `${penTeam}Delayed` ? '3px solid #fff' : 'none', outlineOffset: '-4px' }}
+                  onClick={() => triggerTeamRollout('delayed', penTeam)}
+                  title={`Delayed penalty rollout for ${(penTeam === 'away' ? state.away_name : state.home_name) || penTeam} (the selected team). Click again to hide.`}
+                >
+                  DELAYED
+                </button>
+                <button
+                  className="btn"
+                  style={{ ...penRowBtn, flex: '0.8 1 0', background: state.right_panel_mode === 'fourOnFour' ? '#F36C21' : '#5a6270', color: '#fff' }}
+                  onClick={triggerFourOnFour}
+                  title="4 on 4 rollout. Click again to hide."
+                >
+                  4 V 4
                 </button>
               </div>
 
@@ -2031,9 +2150,6 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                 <button className="btn btn-blue" style={{ borderRadius: '6px' }} onClick={() => triggerRollout(3)}>ROLLOUT 3</button>
             </div>
             <div className="row" style={{ marginTop: '5px' }}>
-                <button className="btn btn-orange" style={{ borderRadius: '6px' }} onClick={triggerDelayedPenalty}>DELAYED PENALTY</button>
-            </div>
-            <div className="row" style={{ marginTop: '5px' }}>
                 {[1, 2, 3].map(n => {
                   const key = n === 1 ? 'banner' : `banner${n}`;
                   const isUp = !!state.banner_active && (getGVar('active_banner', 'banner') === key);
@@ -2051,6 +2167,9 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                 })}
             </div>
           </div>
+
+          </div>
+          {/* end three columns */}
 
           <div className="box" style={{ flex: '1 1 100%' }}>
             <h3>SHOOTOUT MODE (10 ROUNDS)</h3>
@@ -2385,6 +2504,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                   <option value="rollout2" style={selectStyle}>Rollout 2</option>
                   <option value="rollout3" style={selectStyle}>Rollout 3</option>
                   <option value="delayedPenalty" style={selectStyle}>Delayed Penalty</option>
+                  <option value="fourOnFour" style={selectStyle}>4 on 4 Panel</option>
                   <option value="banner" style={selectStyle}>Full Width Banner 1</option>
                   <option value="banner2" style={selectStyle}>Full Width Banner 2</option>
                   <option value="banner3" style={selectStyle}>Full Width Banner 3</option>
@@ -3154,6 +3274,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
               {renderHotkeyRow('Trigger Rollout 2:', 'triggerRollout2')}
               {renderHotkeyRow('Trigger Rollout 3:', 'triggerRollout3')}
               {renderHotkeyRow('Trigger Delayed Penalty:', 'triggerDelayedPenalty')}
+              {renderHotkeyRow('Trigger 4 on 4:', 'triggerFourOnFour')}
               {renderHotkeyRow('Trigger Banner 1:', 'triggerBanner')}
               {renderHotkeyRow('Trigger Banner 2:', 'triggerBanner2')}
               {renderHotkeyRow('Trigger Banner 3:', 'triggerBanner3')}
