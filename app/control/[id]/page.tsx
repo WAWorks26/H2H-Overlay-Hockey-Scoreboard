@@ -37,6 +37,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
   const [activeTab, setActiveTab] = useState('tab-ops');
   const [selectedComp, setSelectedComp] = useState('clock');
   const [listeningKeyFor, setListeningKeyFor] = useState<string | null>(null);
+  const [guideSection, setGuideSection] = useState('start');
   const [exportFolderHandle, setExportFolderHandle] = useState<FileSystemDirectoryHandle | null>(null);
   const [exportFolderName, setExportFolderName] = useState<string>('');
   const [profileEventName, setProfileEventName] = useState<string>('');
@@ -1493,6 +1494,250 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     );
   };
 
+  // ---------------- USER GUIDE TAB ----------------
+  const GUIDE_SECTIONS: [string, string][] = [
+    ['start', 'Getting Started'],
+    ['ops', 'Game Operations'],
+    ['graphics', 'Graphics Settings'],
+    ['hotkeys', 'Hotkeys'],
+    ['system', 'System & Profiles'],
+    ['tips', 'Tips & Troubleshooting'],
+  ];
+
+  const renderUserGuide = () => {
+    const H = (t: string) => (
+      <h3 style={{ fontSize: '15px', fontWeight: 'bold', margin: '22px 0 8px', paddingBottom: '6px', borderBottom: `1px solid ${themeVars.borderCol}` }}>{t}</h3>
+    );
+    const P = (c: React.ReactNode) => <p style={{ fontSize: '13px', lineHeight: 1.6, margin: '0 0 10px' }}>{c}</p>;
+    const L = (items: React.ReactNode[], ordered = false) => {
+      const Tag = ordered ? 'ol' : 'ul';
+      return (
+        <Tag style={{ fontSize: '13px', lineHeight: 1.6, margin: '0 0 12px', paddingLeft: '22px' }}>
+          {items.map((it, i) => <li key={i} style={{ marginBottom: '4px' }}>{it}</li>)}
+        </Tag>
+      );
+    };
+    const B = (t: string) => (
+      <span style={{ display: 'inline-block', fontSize: '11px', fontWeight: 'bold', padding: '1px 6px', borderRadius: '4px', background: themeVars.btnSecondaryBg, color: themeVars.btnSecondaryText, border: `1px solid ${themeVars.btnSecondaryBorder}`, whiteSpace: 'nowrap' }}>{t}</span>
+    );
+    const Tip = (c: React.ReactNode) => (
+      <div style={{ fontSize: '12.5px', lineHeight: 1.55, background: 'rgba(0,180,255,0.08)', borderLeft: '4px solid #00B4FF', borderRadius: '4px', padding: '8px 12px', margin: '6px 0 14px' }}>{c}</div>
+    );
+    const Code = (t: string) => (
+      <code style={{ fontFamily: 'monospace', fontSize: '12px', background: themeVars.bgInput, border: `1px solid ${themeVars.borderCol}`, borderRadius: '3px', padding: '0 4px' }}>{t}</code>
+    );
+
+    let body: React.ReactNode = null;
+    switch (guideSection) {
+      case 'start':
+        body = (<>
+          {H('What this app does')}
+          {P(<>This page is the <strong>control panel</strong>. Everything you change here appears instantly on the <strong>overlay</strong> (the scoreboard graphic) in OBS or any browser that has it open.</>)}
+          {H('Add the overlay to OBS')}
+          {L([
+            <>Click {B('■ Copy Overlay Link')} at the top of this page.</>,
+            <>In OBS, add a <strong>Browser</strong> source and paste the link as the URL. Set the size to <strong>1920 × 1080</strong>.</>,
+            <>In the browser source settings, turn <strong>off</strong> "Shutdown source when not visible" and "Refresh browser when scene becomes active", so OBS never reloads the scoreboard mid-stream.</>,
+            <>Use {B('● Open OBS View')} to check the overlay in a normal browser tab.</>,
+          ], true)}
+          {H('Before every game')}
+          {L([
+            <>Set team names, scores to 0 and the period in <strong>Game Operations</strong>.</>,
+            <>Open the overlay once before going live (ideally on a good connection). Background videos and images are downloaded and saved on that computer, so they play instantly during the stream.</>,
+            <>Press {B('START GAME (ENABLE AUTO-SAVE)')} so the game is saved to the cloud regularly.</>,
+            <>Only keep <strong>one</strong> control panel open per scoreboard. Two open panels both run the clock and can fight each other.</>,
+          ])}
+          {Tip(<>The control panel and overlay stay in sync through the internet. If the venue Wi-Fi drops briefly, the overlay keeps showing the last state and catches up when the connection returns.</>)}
+        </>);
+        break;
+
+      case 'ops':
+        body = (<>
+          {H('Live preview and ON AIR')}
+          {P(<>The <strong>Live Broadcast Display Preview</strong> shows the score, clock and penalties. The <strong>ON AIR</strong> line below it shows anything else on the overlay right now: power play, timeout (with countdown), delayed penalty, goal, 4 on 4, rollouts and banners. Press {B('HIDE')} on it to take a rollout off the air.</>)}
+          {H('Layout')}
+          {P(<>Clock, Team Controls and Penalties sit in three columns. Drag the thin bar between two columns to resize them; double-click a bar to make them equal again. On small windows the columns stack.</>)}
+          {H('Clock & Phase')}
+          {L([
+            <>{B('START CLOCK')} / {B('STOP CLOCK')} runs the game clock. Penalty times count down with it.</>,
+            <>{B('RESET CLOCK')} sets the clock back to the <strong>Period Length</strong>. {B('+1 MIN')} {B('-1 MIN')} {B('+1 SEC')} {B('-1 SEC')} adjust it.</>,
+            <><strong>Game Phase</strong> changes the period (Warm Up, 1st–3rd, OT1, Shoot Out, Final) and resets the clock to the period length.</>,
+            <><strong>Timeout Length</strong> sets how long the timeout rollout stays up.</>,
+            <>{B('START GAME (ENABLE AUTO-SAVE)')} saves the game to the cloud every <strong>Auto-Save (Sec)</strong> seconds.</>,
+          ])}
+          {H('Team Controls')}
+          {L([
+            <>Type each team's name in its box.</>,
+            <>{B('+ GOAL')} (in the team's colors) adds a goal. With <strong>Auto Rollout on Goal</strong> ticked, the goal rollout plays automatically. {B('-1 G')} removes a goal.</>,
+            <>{B('+ SOG')} / {B('-1 SOG')} change shots on goal.</>,
+            <>{B('TIMEOUT')} shows that team's timeout rollout for the Timeout Length. It's outlined in orange with a ● while on air; press it again to hide it early.</>,
+            <>{B('RESET AWAY STATS')}, {B('RESET HOME STATS')} and {B('RESET ALL STATS')} zero scores and shots.</>,
+          ])}
+          {H('Penalties')}
+          {L([
+            <>Pick the team at the top. The selected team has a <strong>blue border</strong> and a ✓.</>,
+            <>Type the player number in the yellow <strong># Player</strong> box and press <strong>Enter</strong> (or {B('+ ADD')}).</>,
+            <>Choose the <strong>Length</strong> first if it isn't a 2:00 minor. Type an exact time in the minutes : seconds boxes for a penalty already partly served.</>,
+            <>{B('DELAYED')} shows the delayed penalty rollout for the selected team. {B('4 V 4')} shows the 4 on 4 rollout. Press either again to hide it.</>,
+            <>Running penalties are listed underneath; edit a time there to correct it, or remove one. {B('CLEAR ALL PENALTIES')} removes them all.</>,
+            <>The <strong>power play</strong> panel appears automatically whenever one team has more players in the box, and shows the team, situation (e.g. 5 VS 4) and time.</>,
+          ])}
+          {Tip(<>Tab moves from the player number straight to {B('+ ADD')}, and the length fields are skipped, so a player number can't end up in the penalty time.</>)}
+          {H('Rollouts and banners')}
+          {L([
+            <>{B('ROLLOUT 1')}–{B('ROLLOUT 3')} show the side rollouts set up in Graphics Settings.</>,
+            <>{B('BANNER 1')}–{B('BANNER 3')} show a full-width banner. Only one banner shows at a time: pressing the one on air hides it, pressing another swaps to it.</>,
+          ])}
+          {H('Shootout')}
+          {P(<>Use {B('SHOW SHOOTOUT GRAPHIC')} to show the tracker under the scoreboard, mark each attempt with {B('GOAL')} or {B('MISS')} for each team, and {B('RESET SHOOTOUT TRACKER')} to clear it.</>)}
+        </>);
+        break;
+
+      case 'graphics':
+        body = (<>
+          {H('Global Architecture (left side)')}
+          {L([
+            <><strong>Scoreboard Layout</strong>: Style 1 Linear Slanted, Style 2 Classic Grid, or Style 3 Compact Split.</>,
+            <><strong>Global Font</strong>, <strong>Skew Angle</strong>, <strong>Corner Radius</strong> and <strong>Bug Border</strong> apply to the whole scoreboard.</>,
+            <><strong>Overlay Scale</strong> and <strong>Position X / Y</strong> place the scoreboard on the OBS canvas. X is measured from the centre, Y from the top. {B('RESET POSITION & SCALE')} puts it back.</>,
+          ])}
+          {H('Rollout text and sequences')}
+          {P(<>Every rollout text field (Goal, Rollouts 1–3, Delayed Penalty, 4 on 4, Timeout, Power Play, Banners 1–3) has a {B('▾')} button that opens its <strong>sequence editor</strong>:</>)}
+          {L([
+            <>{B('+ ADD TEXT')} adds more texts that play one after another while the rollout is up.</>,
+            <>Each text has its own <strong>Show (s)</strong> time, <strong>Effect</strong> and <strong>Speed</strong>. "Component default" uses the element's animation from the Component Editor.</>,
+            <><strong>Loop sequence</strong> repeats the texts; untick it to stop on the last one.</>,
+            <>{B('MATCH DURATION')} sets the rollout's on-screen time to play the whole sequence once.</>,
+          ])}
+          {P(<>Placeholders filled in live:</>)}
+          {L([
+            <>{Code('{TEAM}')}: the team involved (scoring team, team on the power play, team that called the timeout, penalized team).</>,
+            <>{Code('{TIME}')}: power play time remaining, or for 4 on 4 the shortest penalty remaining.</>,
+            <>{Code('{SITUATION}')}: power play strength, e.g. 5 VS 4.</>,
+          ])}
+          {Tip(<>Side rollouts size themselves to the longest text in their sequence, so they don't change width while the texts play.</>)}
+          {H('Component Editor (right side)')}
+          {P(<>Pick an element in <strong>Select Element</strong> (clock, period, team boxes, scores, shots, goal panels, power play panels, delayed penalty, 4 on 4, rollouts, banners, shootout) and adjust it:</>)}
+          {L([
+            <><strong>Auto Hide</strong> and <strong>Secs</strong>: how long a rollout or banner stays up.</>,
+            <><strong>Text</strong>: color, outline, font, size, <strong>Text Alignment</strong> (Default / Left / Center / Right), skew.</>,
+            <><strong>Text Animation</strong>: the effect, its duration, and <strong>Anim Intensity</strong> (higher = bigger zoom, more blur, longer slide, etc.). Changing these replays the animation on the overlay so you can see it.</>,
+            <><strong>Border</strong>, <strong>Layer System</strong> (color in front of or behind the media) and <strong>Background Type</strong> (solid, clear, 2- or 3-color gradient, radial).</>,
+            <><strong>BG Media</strong>: upload an image or video, then set Scale, Alpha and Position. {B('CLEAR MEDIA')} removes it.</>,
+          ])}
+          {H('Team colors on rollouts')}
+          {L([
+            <><strong>Match Team Box Background</strong> (on by default) makes goal, power play, timeout, delayed penalty and shootout backgrounds use the team box colors. 4 on 4 blends both teams' colors. Untick it on an element to use its own background.</>,
+            <><strong>Team Logo BG</strong> (Away / Home Power Play Panel) puts that team's logo or video behind the power play and timeout. The scale and position set there only affect that panel.</>,
+          ])}
+          {H('Editing tools')}
+          {L([
+            <>{B('↩ UNDO')} / {B('↪ REDO')} step through graphics changes.</>,
+            <>{B('📋 COPY SETTINGS')} then {B('📥 PASTE SETTINGS')} copies one element's look onto another.</>,
+            <>{B('⇄ SWAP TEAMS')} swaps every Away and Home graphic setting (team boxes, scores, shots, goal and power play panels, team colors). Tick <strong>+ names</strong> to swap the team names too. Scores and penalties are not moved.</>,
+          ])}
+        </>);
+        break;
+
+      case 'hotkeys':
+        body = (<>
+          {H('Setting a hotkey')}
+          {L([
+            <>Open the <strong>Hotkeys</strong> tab.</>,
+            <>Click the button next to an action. It turns orange and shows <strong>PRESS KEY...</strong></>,
+            <>Press the key you want to use. Click the button again to cancel.</>,
+            <>Click {B('✖')} next to it to unassign that key, or {B('CLEAR ALL HOTKEYS')} to unassign everything.</>,
+          ], true)}
+          {H('What can have a hotkey')}
+          {L([
+            <><strong>Global</strong>: clock start/stop, reset, ±1 minute, ±1 second, reset all stats, clear penalties, Rollouts 1–3, Delayed Penalty, 4 on 4, Banners 1–3.</>,
+            <><strong>Away / Home</strong>: +1 / -1 goal, +1 / -1 shot, Timeout, Delayed Penalty.</>,
+          ])}
+          {Tip(<>Hotkeys are ignored while you're typing in a text box (team names, player numbers), so typing "1" won't fire Rollout 1. Hotkeys are saved with the scoreboard and included in profile exports. The control panel window must be focused for hotkeys to work.</>)}
+        </>);
+        break;
+
+      case 'system':
+        body = (<>
+          {H('UI Appearance & Output')}
+          {L([
+            <><strong>Interface Theme</strong> changes the control panel's colors: Light, Concrete, Slate or Studio Black. It doesn't affect the overlay.</>,
+            <><strong>Green Screen (Chroma Key)</strong> puts a green background behind the overlay for software that can't use a transparent browser source.</>,
+          ])}
+          {H('Local Browser Storage')}
+          {P(<>These save to this browser on this computer only:</>)}
+          {L([
+            <>{B('SAVE TO TEMPORARY CACHE')}: a quick backup of this scoreboard.</>,
+            <>{B('SAVE AS USER SYSTEM DEFAULT')}: saves the current setup (graphics, names, settings) as your default.</>,
+            <>{B('RESTORE USER DEFAULTS')}: loads that default back onto this scoreboard.</>,
+            <>{B('FACTORY RESET')}: clears names, scores, penalties and all graphics settings back to the original look. It asks to confirm first.</>,
+          ])}
+          {H('Profiles (JSON export / import)')}
+          {P(<>A profile is a file holding the whole setup: team names and colors, every graphics setting, rollout texts and sequences, and hotkeys. Use profiles to keep a look per team, league or event, or to move a setup to another computer.</>)}
+          {L([
+            <>Type a name in <strong>Save As (Event / Profile Name)</strong>, e.g. <em>Playoff_Game_1_RinkA</em>.</>,
+            <>Optionally choose {B('📁 SELECT EXPORT FOLDER')} so profiles always go to the same folder ({B('✖ RESET')} goes back to Downloads).</>,
+            <>{B('💾 EXPORT JSON')} saves the profile file.</>,
+            <>{B('📥 IMPORT JSON')} loads a profile file and applies it to this scoreboard straight away.</>,
+          ], true)}
+          {Tip(<>Uploaded logos and videos are stored online, so a profile refers to them by link and works on any computer.</>)}
+        </>);
+        break;
+
+      case 'tips':
+        body = (<>
+          {H('Something looks wrong on the overlay')}
+          {L([
+            <>Check <strong>ON AIR</strong> in Game Operations to see what the overlay should be showing.</>,
+            <>Make sure only one control panel is open for this scoreboard.</>,
+            <>In OBS, right-click the browser source → <strong>Refresh</strong>, or open it with {B('● Open OBS View')} to compare.</>,
+          ])}
+          {H('Videos start late')}
+          {P(<>The overlay downloads every background video once and keeps it on that computer. Open the overlay before the stream so it's done downloading, and keep video files short and small (720p, a few MB).</>)}
+          {H('A setting I changed has no effect')}
+          {L([
+            <>If <strong>Match Team Box Background</strong> is on, that element's own background is ignored; untick it.</>,
+            <>Text animations only play when the text changes or the rollout appears. Move the intensity slider or press the rollout again to preview.</>,
+            <>Undo a mistake with {B('↩ UNDO')}, or export a profile before big changes so you can import it back.</>,
+          ])}
+          {H('Changes on Vercel are missing')}
+          {P(<>Code changes only reach the live site after they are pushed to GitHub and Vercel finishes deploying. Hard-refresh the page (Ctrl+Shift+R) afterwards.</>)}
+        </>);
+        break;
+    }
+
+    return (
+      <div style={{ display: 'flex', gap: '20px', alignItems: 'flex-start', flexWrap: 'wrap' }}>
+        <div className="box" style={{ flex: '0 0 220px', position: 'sticky', top: '10px' }}>
+          <h3>USER GUIDE</h3>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+            {GUIDE_SECTIONS.map(([key, label]) => {
+              const on = guideSection === key;
+              return (
+                <button
+                  key={`guide_${key}`}
+                  type="button"
+                  onClick={() => setGuideSection(key)}
+                  style={{
+                    textAlign: 'left', padding: '10px 12px', borderRadius: '6px', fontSize: '12px', fontWeight: 'bold', cursor: 'pointer',
+                    background: on ? '#007bff' : themeVars.btnSecondaryBg, color: on ? '#fff' : themeVars.btnSecondaryText,
+                    border: `1px solid ${on ? '#007bff' : themeVars.btnSecondaryBorder}`,
+                  }}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <div className="box" style={{ flex: '1 1 480px', minWidth: 0, maxWidth: '900px', color: themeVars.textColor }}>
+          <h3 style={{ marginBottom: 0 }}>{(GUIDE_SECTIONS.find(([k]) => k === guideSection) || GUIDE_SECTIONS[0])[1].toUpperCase()}</h3>
+          {body}
+        </div>
+      </div>
+    );
+  };
+
   const renderHotkeyRow = (label: string, actionKey: string) => {
     const currentVal = hotkeysConfig[actionKey] || '';
     const isListening = listeningKeyFor === actionKey;
@@ -1691,6 +1936,9 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
         </button>
         <button className={`tab-btn ${activeTab === 'tab-system' ? 'active' : ''}`} onClick={() => setActiveTab('tab-system')}>
           SYSTEM & PROFILES
+        </button>
+        <button className={`tab-btn ${activeTab === 'tab-guide' ? 'active' : ''}`} onClick={() => setActiveTab('tab-guide')}>
+          USER GUIDE
         </button>
       </div>
 
@@ -3517,6 +3765,11 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
           </div>
 
         </div>
+      </div>
+
+      {/* USER GUIDE TAB */}
+      <div id="tab-guide" className={`tab-content ${activeTab === 'tab-guide' ? 'active' : ''}`}>
+        {renderUserGuide()}
       </div>
 
     </div>
