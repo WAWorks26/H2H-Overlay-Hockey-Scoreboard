@@ -1038,7 +1038,7 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
       <div 
         style={{
           // stretch = same width as the main scoreboard above it
-          marginTop: '6px', alignSelf: 'stretch', boxSizing: 'border-box', ...shootoutStyle,
+          marginTop: '6px', alignSelf: 'stretch', ...shootoutStyle, // shootoutStyle already sets boxSizing: 'border-box'
           borderRadius: `${gc.cornerRadius || 8}px`, padding: soTeamBg ? '4px' : '8px 24px',
           boxShadow: '0 8px 16px rgba(0,0,0,0.6)', transform: `skewX(${shootoutContainerSkew})`,
           display: 'flex', flexDirection: 'column', alignItems: 'stretch', justifyContent: 'center', gap: soTeamBg ? '4px' : '6px', zIndex: 100
