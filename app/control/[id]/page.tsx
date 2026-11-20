@@ -1440,6 +1440,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
         #control-panel .box { background-color: ${themeVars.bgBox} !important; border-color: ${themeVars.borderCol} !important; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
         #control-panel .box h3, #control-panel .box label { color: ${themeVars.headerTextCol} !important; }
         #control-panel input, #control-panel select { background-color: ${themeVars.bgInput} !important; color: ${themeVars.textColor} !important; border-color: ${themeVars.borderCol} !important; }
+        #control-panel #inp-pen-plyr { background: transparent !important; background-color: transparent !important; color: #1a1a1a !important; border: none !important; box-shadow: none !important; }
+        #control-panel #inp-pen-plyr::placeholder { color: rgba(58,42,0,0.55) !important; }
         #control-panel .tab-headers { background-color: ${themeVars.tabHeaderBg} !important; border-bottom-color: ${themeVars.borderCol} !important; }
         #control-panel .tab-btn { color: ${themeVars.tabInactiveText} !important; font-weight: bold; border: none; padding: 12px 20px; cursor: pointer; transition: background 0.15s ease; }
         #control-panel .tab-btn:hover:not(.active) { background-color: ${isLight ? '#c9cfd8' : '#3a404a'} !important; color: ${isLight ? '#1c2431' : '#ffffff'} !important; }
@@ -1803,6 +1805,33 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             </div>
 
             <div className="row" style={{ marginTop: '10px' }}>
+              <label>Timeout Length (Sec):</label>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flex: 1, minWidth: 0 }}>
+                <input
+                  type="number" min="1" max="300"
+                  value={getGVar('timeout_duration', '30')}
+                  onChange={(e) => updateGraphicVar('timeout_duration', e.target.value, true)}
+                  title="How long the timeout rollout stays up"
+                  style={{ width: '60px', flex: 'none' }}
+                />
+                {['30', '60', '90'].map(v => {
+                  const on = String(getGVar('timeout_duration', '30')) === v;
+                  return (
+                    <button
+                      key={`to_len_${v}`}
+                      type="button"
+                      onClick={() => updateGraphicVar('timeout_duration', v, true)}
+                      style={{ padding: '6px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer', flex: 'none',
+                        background: on ? '#007bff' : 'transparent', color: on ? '#fff' : themeVars.textColor, border: `1px solid ${on ? '#007bff' : themeVars.borderCol}` }}
+                    >
+                      {v}s
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="row" style={{ marginTop: '10px' }}>
               <label>Game Phase:</label>
               <select value={state.period} onChange={(e) => handlePeriodChange(e.target.value)} style={selectStyle}>
                   <option value="WARM UP" style={selectStyle}>Warm Up</option>
@@ -1901,8 +1930,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                 })}
               </div>
 
-              <div style={{ display: 'flex', alignItems: 'stretch', gap: '6px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', background: '#FFD54A', borderRadius: '6px', padding: '0 4px 0 10px', flex: 1, border: '2px solid #E0A800' }}>
+              <div style={{ display: 'flex', alignItems: 'stretch', gap: '6px', width: '100%', boxSizing: 'border-box' }}>
+                <div style={{ display: 'flex', alignItems: 'center', background: '#FFD54A', borderRadius: '6px', padding: '0 4px 0 10px', flex: '0 0 calc(50% - 3px)', minWidth: 0, boxSizing: 'border-box', border: '2px solid #E0A800' }}>
                   <span style={{ color: '#3a2a00', fontWeight: 900, fontSize: '18px' }}>#</span>
                   <input
                     type="text"
@@ -1915,7 +1944,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                     style={{ flex: 1, minWidth: 0, background: 'transparent', border: 'none', outline: 'none', color: '#1a1a1a', fontWeight: 900, fontSize: '20px', padding: '6px 6px', boxShadow: 'none' }}
                   />
                 </div>
-                <button className="btn btn-red" style={{ borderRadius: '6px', flex: 'none', padding: '0 16px', fontWeight: 'bold' }} onClick={addPenalty} title="Add penalty (or press Enter in the player # field)">
+                <button className="btn btn-red" style={{ borderRadius: '6px', flex: '1 1 0', minWidth: 0, width: 'auto', margin: 0, padding: '0 8px', fontWeight: 'bold', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', boxSizing: 'border-box' }} onClick={addPenalty} title="Add penalty (or press Enter in the player # field)">
                   + ADD PENALTY
                 </button>
               </div>
