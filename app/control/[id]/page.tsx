@@ -58,6 +58,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     return [1, 1, 1];
   });
   const opsColsRef = useRef<HTMLDivElement | null>(null);
+  // Narrowest a Game Ops column may get before buttons stop being readable
+  const OPS_MIN_COL_PX = 340;
 
   // Penalty entry form
   const [penTeam, setPenTeam] = useState<'away' | 'home'>('away');
@@ -935,7 +937,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     const start = [...opsCols];
     const total = start.reduce((a, b) => a + b, 0);
     const usable = box.getBoundingClientRect().width - 2 * 14; // minus the two dividers
-    const minFr = total * 0.18;                                  // each column keeps >= 18%
+    const minFr = Math.min(total * 0.45, total * (OPS_MIN_COL_PX / Math.max(usable, 1))); // keep columns readable
     let latest = start;
     const move = (ev: PointerEvent) => {
       const dFr = ((ev.clientX - startX) / usable) * total;
@@ -996,7 +998,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
   };
 
   const penRowBtn: React.CSSProperties = {
-    borderRadius: '6px', flex: '1 1 0', minWidth: 0, width: 'auto', margin: 0, padding: '0 4px',
+    borderRadius: '6px', flex: '1 1 0', minWidth: '58px', width: 'auto', margin: 0, padding: '0 4px',
     fontWeight: 'bold', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', boxSizing: 'border-box', minHeight: '40px',
   };
 
@@ -1550,9 +1552,14 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
         #control-panel .team-row .btn.tr-narrow { flex: 0.75 1 0 !important; }
         #control-panel .team-row .btn.tr-wide { flex: 1.45 1 0 !important; }
         #control-panel .team-row .btn { flex: 1 1 0 !important; min-width: 0 !important; padding: 9px 4px !important; font-size: 10px !important; white-space: nowrap !important; overflow: hidden; text-overflow: ellipsis; }
-        #control-panel .ops-cols > .box { min-width: 0; margin: 0; }
+        #control-panel .ops-cols > .box { min-width: 0; margin: 0; container-type: inline-size; }
         #control-panel .ops-col-handle:hover > div { background: #007bff !important; }
-        @media (max-width: 900px) {
+        /* Button text scales with its column (cqi = 1% of the column width), within readable limits */
+        #control-panel .ops-cols .btn { font-size: clamp(9px, 2.7cqi, 13px) !important; }
+        #control-panel .ops-cols .team-row .btn { font-size: clamp(9px, 2.5cqi, 12px) !important; min-width: 50px !important; }
+        #control-panel .ops-cols .pen-row .btn, #control-panel .ops-cols .pen-team-btn { font-size: clamp(10px, 2.9cqi, 13px) !important; }
+        #control-panel .team-row { flex-wrap: wrap; }
+        @media (max-width: 1140px) {
           #control-panel .ops-cols { grid-template-columns: minmax(0, 1fr) !important; row-gap: 15px; }
           #control-panel .ops-col-handle { display: none !important; }
         }
@@ -1892,7 +1899,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             className="ops-cols"
             style={{
               flex: '1 1 100%', display: 'grid', alignItems: 'stretch', minWidth: 0,
-              gridTemplateColumns: `minmax(0, ${opsCols[0]}fr) 14px minmax(0, ${opsCols[1]}fr) 14px minmax(0, ${opsCols[2]}fr)`,
+              gridTemplateColumns: `minmax(${OPS_MIN_COL_PX}px, ${opsCols[0]}fr) 14px minmax(${OPS_MIN_COL_PX}px, ${opsCols[1]}fr) 14px minmax(${OPS_MIN_COL_PX}px, ${opsCols[2]}fr)`,
             }}
           >
           
@@ -1934,30 +1941,25 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             </div>
 
             <div className="row" style={{ marginTop: '10px' }}>
-              <label>Timeout Length (Sec):</label>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '4px', flex: 1, minWidth: 0 }}>
-                <input
-                  type="number" min="1" max="300"
-                  value={getGVar('timeout_duration', '30')}
-                  onChange={(e) => updateGraphicVar('timeout_duration', e.target.value, true)}
-                  title="How long the timeout rollout stays up"
-                  style={{ width: '60px', flex: 'none' }}
-                />
-                {['30', '60', '90'].map(v => {
-                  const on = String(getGVar('timeout_duration', '30')) === v;
-                  return (
-                    <button
-                      key={`to_len_${v}`}
-                      type="button"
-                      onClick={() => updateGraphicVar('timeout_duration', v, true)}
-                      style={{ padding: '6px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer', flex: 'none',
-                        background: on ? '#007bff' : 'transparent', color: on ? '#fff' : themeVars.textColor, border: `1px solid ${on ? '#007bff' : themeVars.borderCol}` }}
-                    >
-                      {v}s
-                    </button>
-                  );
-                })}
-              </div>
+              <label>Timeout Length:</label>
+              {(() => {
+                const cur = String(getGVar('timeout_duration', '30') || '30');
+                const opts = ['30', '45', '60', '75', '90', '120'];
+                if (!opts.includes(cur)) opts.push(cur);
+                return (
+                  <select
+                    value={cur}
+                    onChange={(e) => updateGraphicVar('timeout_duration', e.target.value, true)}
+                    title="How long the timeout rollout stays up"
+                    style={{ ...selectStyle, flex: 1, minWidth: 0 }}
+                  >
+                    {opts.sort((x, y) => parseInt(x) - parseInt(y)).map(v => {
+                      const n = parseInt(v) || 0;
+                      return <option key={`to_${v}`} value={v} style={selectStyle}>{n >= 60 ? `${Math.floor(n / 60)}:${String(n % 60).padStart(2, '0')}` : `0:${String(n).padStart(2, '0')}`} ({n} sec)</option>;
+                    })}
+                  </select>
+                );
+              })()}
             </div>
 
             <div className="row" style={{ marginTop: '10px' }}>
@@ -2050,27 +2052,31 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
               <div style={{ display: 'flex', gap: '6px', marginBottom: '8px' }}>
                 {(['away', 'home'] as const).map(t => {
                   const on = penTeam === t;
-                  const col = t === 'away' ? (state.away_color || '#00468b') : (state.home_color || '#222222');
                   return (
                     <button
                       key={`pen_team_${t}`}
                       type="button"
+                      className="pen-team-btn"
                       onClick={() => setPenTeam(t)}
+                      title={on ? 'Selected team for the penalty' : 'Select this team'}
                       style={{
-                        flex: 1, padding: '8px 6px', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold', fontSize: '12px',
-                        background: on ? col : 'transparent', color: on ? '#fff' : themeVars.textColor,
-                        border: on ? `2px solid ${col}` : `2px solid ${themeVars.borderCol}`,
-                        boxShadow: on ? '0 0 0 2px rgba(255,255,255,0.15) inset' : 'none',
+                        ...teamBoxBg(t),
+                        flex: '1 1 0', minWidth: 0, padding: '8px 6px', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold',
+                        background: 'var(--btn-bg)', color: 'var(--btn-fg)',
+                        opacity: on ? 1 : 0.4, filter: on ? 'none' : 'saturate(0.5)',
+                        border: on ? `3px solid ${isLight ? '#111' : '#fff'}` : '3px solid transparent',
+                        boxShadow: on ? '0 2px 6px rgba(0,0,0,0.35)' : 'none',
+                        textShadow: '0 1px 2px rgba(0,0,0,0.35)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
                       }}
                     >
-                      {(t === 'away' ? state.away_name : state.home_name) || t.toUpperCase()}
+                      {on ? '✓ ' : ''}{(t === 'away' ? state.away_name : state.home_name) || t.toUpperCase()}
                     </button>
                   );
                 })}
               </div>
 
-              <div style={{ display: 'flex', alignItems: 'stretch', gap: '6px', width: '100%', boxSizing: 'border-box' }}>
-                <div style={{ display: 'flex', alignItems: 'center', background: '#FFD54A', borderRadius: '6px', padding: '0 4px 0 8px', flex: '1.3 1 0', minWidth: '70px', boxSizing: 'border-box', border: '2px solid #E0A800' }}>
+              <div className="pen-row" style={{ display: 'flex', alignItems: 'stretch', gap: '6px', width: '100%', boxSizing: 'border-box', flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', alignItems: 'center', background: '#FFD54A', borderRadius: '6px', padding: '0 4px 0 8px', flex: '1.3 1 0', minWidth: '96px', boxSizing: 'border-box', border: '2px solid #E0A800' }}>
                   <span style={{ color: '#3a2a00', fontWeight: 900, fontSize: '18px' }}>#</span>
                   <input
                     type="text"
@@ -2080,7 +2086,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                     value={penPlyr}
                     onChange={(e) => setPenPlyr(e.target.value)}
                     onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addPenalty(); } }}
-                    style={{ flex: 1, minWidth: 0, background: 'transparent', border: 'none', outline: 'none', color: '#1a1a1a', fontWeight: 900, fontSize: '20px', padding: '6px 6px', boxShadow: 'none' }}
+                    style={{ flex: 1, minWidth: 0, background: 'transparent', border: 'none', outline: 'none', color: '#1a1a1a', fontWeight: 900, fontSize: 'clamp(14px, 4.5cqi, 20px)', padding: '6px 6px', boxShadow: 'none' }}
                   />
                 </div>
                 <button className="btn btn-red" style={penRowBtn} onClick={addPenalty} title="Add penalty (or press Enter in the player # field)">
@@ -2104,26 +2110,30 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                 </button>
               </div>
 
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '8px', flexWrap: 'wrap' }}>
-                <span style={{ fontSize: '11px', fontWeight: 'bold', color: themeVars.textMuted }}>LENGTH:</span>
-                {[['2', '00'], ['4', '00'], ['5', '00'], ['10', '00']].map(([m, sc]) => {
-                  const on = String(parseInt(penMin) || 0) === m && (parseInt(penSec) || 0) === 0;
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '8px' }}>
+                <span style={{ fontSize: '11px', fontWeight: 'bold', color: themeVars.textMuted, flex: 'none' }}>LENGTH:</span>
+                {(() => {
+                  const curSecs = (parseInt(penMin) || 0) * 60 + Math.min(59, parseInt(penSec) || 0);
+                  const opts: [number, string][] = [[90, '1:30'], [120, '2:00 Minor'], [180, '3:00'], [240, '4:00 Double Minor'], [300, '5:00 Major'], [600, '10:00 Misconduct']];
+                  if (!opts.some(([v]) => v === curSecs)) opts.push([curSecs, `${Math.floor(curSecs / 60)}:${String(curSecs % 60).padStart(2, '0')}`]);
                   return (
-                    <button
-                      key={`pen_len_${m}`}
-                      type="button"
+                    <select
+                      id="sel-pen-length"
                       tabIndex={-1}
-                      onClick={() => { setPenMin(m); setPenSec(sc); }}
-                      style={{ padding: '4px 8px', borderRadius: '4px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer',
-                        background: on ? '#007bff' : 'transparent', color: on ? '#fff' : themeVars.textColor, border: `1px solid ${on ? '#007bff' : themeVars.borderCol}` }}
+                      value={String(curSecs)}
+                      onChange={(e) => {
+                        const v = parseInt(e.target.value) || 120;
+                        setPenMin(String(Math.floor(v / 60)));
+                        setPenSec(String(v % 60).padStart(2, '0'));
+                      }}
+                      style={{ ...selectStyle, flex: 1, minWidth: 0 }}
                     >
-                      {m}:00
-                    </button>
+                      {opts.sort((x, y) => x[0] - y[0]).map(([v, label]) => (
+                        <option key={`pl_${v}`} value={String(v)} style={selectStyle}>{label}</option>
+                      ))}
+                    </select>
                   );
-                })}
-                <input type="number" id="inp-pen-min" tabIndex={-1} value={penMin} min="0" onChange={(e) => setPenMin(e.target.value)} style={{ width: '46px', flex: 'none', textAlign: 'center', marginLeft: 'auto' }} />
-                <span style={{ fontWeight: 'bold' }}>:</span>
-                <input type="number" id="inp-pen-sec" tabIndex={-1} value={penSec} min="0" max="59" onChange={(e) => setPenSec(e.target.value)} style={{ width: '46px', flex: 'none', textAlign: 'center' }} />
+                })()}
               </div>
             </div>
             <div className="row"><button className="btn btn-orange" style={{ borderRadius: '6px' }} onClick={() => updateField('penalties', [])}>CLEAR ALL PENALTIES</button></div>
@@ -2858,7 +2868,33 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                   </select>
                 </div>
 
-                <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+                {['awayPP', 'homePP', 'awayGoal', 'homeGoal', 'delayedPenalty', 'fourOnFour'].includes(selectedComp) && (() => {
+                  const v = getGVar(`${selectedComp}_use_team_bg`, true);
+                  const on = v !== false && v !== 'false';
+                  const what = selectedComp === 'fourOnFour'
+                    ? 'Blend of the Away and Home Team Box colors'
+                    : selectedComp === 'delayedPenalty'
+                      ? 'Penalized team\'s Team Box background (per-team DELAYED buttons)'
+                      : `${selectedComp.startsWith('away') ? 'Away' : 'Home'} Team Box background${selectedComp.endsWith('PP') ? ' (also used by that team\'s Timeout)' : ''}`;
+                  return (
+                    <div style={{ background: on ? 'rgba(0,123,255,0.08)' : 'transparent', border: `1px solid ${on ? '#007bff' : themeVars.borderCol}`, borderRadius: '6px', padding: '8px 10px', marginBottom: '10px' }}>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '8px', width: 'auto', cursor: 'pointer', fontWeight: 'bold', fontSize: '12px' }}>
+                        <input
+                          type="checkbox"
+                          checked={on}
+                          onChange={(e) => updateGraphicVar(`${selectedComp}_use_team_bg`, e.target.checked, true)}
+                          style={{ flex: 'none', width: 'auto', margin: 0 }}
+                        />
+                        Match Team Box Background
+                      </label>
+                      <div style={{ fontSize: '11px', color: themeVars.textMuted, marginTop: '4px', marginLeft: '22px' }}>
+                        {on ? `${what}. Untick to use the background settings below.` : 'Using the background settings below.'}
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                <div className="row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px', opacity: (['awayPP', 'homePP', 'awayGoal', 'homeGoal', 'delayedPenalty', 'fourOnFour'].includes(selectedComp) && getGVar(`${selectedComp}_use_team_bg`, true) !== false && getGVar(`${selectedComp}_use_team_bg`, true) !== 'false') ? 0.5 : 1 }}>
                   <label>Background Type:</label>
                   <select 
                     value={bgType} 

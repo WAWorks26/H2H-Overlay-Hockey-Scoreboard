@@ -581,18 +581,48 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
     </span>
   );
 
+  // Elements whose background follows a team box, and which team
+  const TEAM_BG_SIDE: Record<string, 'away' | 'home'> = {
+    awayPP: 'away', homePP: 'home', awayGoal: 'away', homeGoal: 'home', awayDelayed: 'away', homeDelayed: 'home',
+  };
+  const TEAM_BG_PROPS = ['bg_type', 'bg_color', 'bg_col2', 'bg_col3', 'col1_alpha', 'col2_alpha', 'col3_alpha', 'bg_angle', 'mid_pos', 'mid_width', 'bg_alpha'];
+  // "Match Team Box Background" setting (on unless unticked). Delayed penalties share one setting.
+  const teamBgOn = (compKey: string) => {
+    const k = (compKey === 'awayDelayed' || compKey === 'homeDelayed') ? 'delayedPenalty' : compKey;
+    const v = gc[`${k}_use_team_bg`];
+    return v !== false && v !== 'false';
+  };
+
   const activePanelKey = 
     ppActive ? (ppSide === 'away' ? 'awayPP' : 'homePP') :
     isAwayGoal ? 'awayGoal' :
     isHomeGoal ? 'homeGoal' :
     isGoal ? 'goal' :
+    currentMode === 'awayDelayed' ? 'awayDelayed' :
+    currentMode === 'homeDelayed' ? 'homeDelayed' :
     isDelayed ? 'delayedPenalty' :
     isFourOnFour ? 'fourOnFour' :
     currentMode === 'awayTimeout' ? 'awayPP' :
     currentMode === 'homeTimeout' ? 'homePP' :
     isRollout ? currentMode : 'rollout1';
 
-  const getCompVar = (compKey: string, propSuffix: string, fallback: any = undefined) => {
+  const getCompVar = (compKey: string, propSuffix: string, fallback: any = undefined): any => {
+    // ---- Team-linked rollouts take their background from the team box ----
+    // Power play + timeout (awayPP/homePP), goals, and per-team delayed penalties
+    // use the Away/Home Team Box background unless "Match Team Box Background" is
+    // unticked for that element in the Component Editor.
+    const side = TEAM_BG_SIDE[compKey];
+    if (side && TEAM_BG_PROPS.includes(propSuffix) && teamBgOn(compKey)) {
+      const tk = side === 'away' ? 'awayTeam' : 'homeTeam';
+      const v = gc[`${tk}_${propSuffix}`];
+      if (v !== undefined && v !== '') return v;
+      if (propSuffix === 'bg_color') return side === 'away' ? (state.away_color || '#00468b') : (state.home_color || '#111111');
+      if (propSuffix === 'bg_type') return 'solid';
+      return fallback;
+    }
+    // Per-team delayed penalty: everything else comes from the Delayed Penalty element
+    if (compKey === 'awayDelayed' || compKey === 'homeDelayed') return getCompVar('delayedPenalty', propSuffix, fallback);
+
     // Power play panels: one per team (awayPP / homePP) so each team's logo can be
     // framed independently. Lookup order:
     //   media url / video / loop: PP team's team-box media (if "Team Logo BG" is on and
@@ -662,7 +692,13 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
     return `rgba(${r}, ${g}, ${b}, ${a})`;
   };
 
-  const getCompBackgroundStyle = (compKey: string, fallbackColor: string) => {
+  const getCompBackgroundStyle = (compKey: string, fallbackColor: string): React.CSSProperties => {
+    if (compKey === 'fourOnFour' && teamBgOn('fourOnFour')) {
+      // Away team box color fading into the home team box color
+      const awayC = gc.awayTeam_bg_color || state.away_color || '#00468b';
+      const homeC = gc.homeTeam_bg_color || state.home_color || '#111111';
+      return { backgroundImage: `linear-gradient(90deg, ${hexToRgba(awayC, 100)} 0%, ${hexToRgba(awayC, 100)} 30%, ${hexToRgba(homeC, 100)} 70%, ${hexToRgba(homeC, 100)} 100%)` };
+    }
     const defaultTeamColor = 
       compKey === 'awayTeam' || compKey === 'awayGoal' ? (state.away_color || '#00468b') : 
       compKey === 'homeTeam' || compKey === 'homeGoal' ? (state.home_color || '#111111') : fallbackColor;
@@ -698,6 +734,10 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
 
     return { backgroundColor: c1, backgroundImage: 'none' };
   };
+
+  // Penalty chips under the bug use the team box background (solid team color if the box is clear)
+  const penChipBg = (teamKey: string, teamColor: string): React.CSSProperties =>
+    getCompVar(teamKey, 'bg_type', 'solid') === 'clear' ? { backgroundColor: teamColor } : getCompBackgroundStyle(teamKey, teamColor);
 
   const getCompStyle = (compKey: string, defaultBg: string, defaultTextCol: string, defaultSize: number) => {
     const color = getCompVar(compKey, 'text_color', defaultTextCol);
@@ -1084,7 +1124,7 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
                     {awayPens.length > 0 && (
                       <div style={{ position: 'absolute', top: '100%', left: 0, width: '100%', marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '4px', zIndex: 10 }}>
                         {awayPens.map(p => (
-                          <div key={p.id} style={{ background: state.away_color || '#00468b', color: '#fff', padding: '6px 12px', borderRadius: '4px', fontSize: '14px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box' }}>
+                          <div key={p.id} style={{ ...penChipBg('awayTeam', state.away_color || '#00468b'), color: getCompVar('awayTeam', 'text_color', '#fff'), padding: '6px 12px', borderRadius: '4px', fontSize: '14px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box' }}>
                             <span style={{ transform: getTextSkewTransform('awayTeam') }}>#{p.plyr}</span>
                             <span style={{ transform: getTextSkewTransform('awayTeam') }}>{formatTime(p.time)}</span>
                           </div>
@@ -1106,7 +1146,7 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
                     {homePens.length > 0 && (
                       <div style={{ position: 'absolute', top: '100%', left: 0, width: '100%', marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '4px', zIndex: 10 }}>
                         {homePens.map(p => (
-                          <div key={p.id} style={{ background: state.home_color || '#111111', color: '#fff', padding: '6px 12px', borderRadius: '4px', fontSize: '14px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box' }}>
+                          <div key={p.id} style={{ ...penChipBg('homeTeam', state.home_color || '#111111'), color: getCompVar('homeTeam', 'text_color', '#fff'), padding: '6px 12px', borderRadius: '4px', fontSize: '14px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box' }}>
                             <span style={{ transform: getTextSkewTransform('homeTeam') }}>#{p.plyr}</span>
                             <span style={{ transform: getTextSkewTransform('homeTeam') }}>{formatTime(p.time)}</span>
                           </div>
@@ -1245,7 +1285,7 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
                     {awayPens.length > 0 && (
                       <div style={{ position: 'absolute', left: '130px', width: '180px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
                         {awayPens.map(p => (
-                          <div key={p.id} style={{ background: state.away_color || '#00468b', color: '#fff', padding: '6px 12px', borderRadius: '4px', fontSize: '14px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box' }}>
+                          <div key={p.id} style={{ ...penChipBg('awayTeam', state.away_color || '#00468b'), color: getCompVar('awayTeam', 'text_color', '#fff'), padding: '6px 12px', borderRadius: '4px', fontSize: '14px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box' }}>
                             <span style={{ transform: getTextSkewTransform('awayTeam') }}>#{p.plyr}</span>
                             <span style={{ transform: getTextSkewTransform('awayTeam') }}>{formatTime(p.time)}</span>
                           </div>
@@ -1255,7 +1295,7 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
                     {homePens.length > 0 && (
                       <div style={{ position: 'absolute', left: '380px', width: '180px', display: 'flex', flexDirection: 'column', gap: '4px' }}>
                         {homePens.map(p => (
-                          <div key={p.id} style={{ background: state.home_color || '#111111', color: '#fff', padding: '6px 12px', borderRadius: '4px', fontSize: '14px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box' }}>
+                          <div key={p.id} style={{ ...penChipBg('homeTeam', state.home_color || '#111111'), color: getCompVar('homeTeam', 'text_color', '#fff'), padding: '6px 12px', borderRadius: '4px', fontSize: '14px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box' }}>
                             <span style={{ transform: getTextSkewTransform('homeTeam') }}>#{p.plyr}</span>
                             <span style={{ transform: getTextSkewTransform('homeTeam') }}>{formatTime(p.time)}</span>
                           </div>
@@ -1411,7 +1451,7 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
                   <div style={{ position: 'absolute', top: '100%', left: '110px', width: `${S3_TEAM_W}px`, display: 'flex', gap: '8px', zIndex: 10, marginTop: '4px' }}>
                     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '4px' }}>
                       {awayPens.map(p => (
-                        <div key={p.id} style={{ background: state.away_color || '#00468b', color: '#fff', padding: '6px 8px', borderRadius: '4px', fontSize: '12px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box' }}>
+                        <div key={p.id} style={{ ...penChipBg('awayTeam', state.away_color || '#00468b'), color: getCompVar('awayTeam', 'text_color', '#fff'), padding: '6px 8px', borderRadius: '4px', fontSize: '12px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box' }}>
                           <span style={{ transform: getTextSkewTransform('awayTeam') }}>#{p.plyr}</span>
                           <span style={{ transform: getTextSkewTransform('awayTeam') }}>{formatTime(p.time)}</span>
                         </div>
@@ -1419,7 +1459,7 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
                     </div>
                     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '4px' }}>
                       {homePens.map(p => (
-                        <div key={p.id} style={{ background: state.home_color || '#111111', color: '#fff', padding: '6px 8px', borderRadius: '4px', fontSize: '12px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box' }}>
+                        <div key={p.id} style={{ ...penChipBg('homeTeam', state.home_color || '#111111'), color: getCompVar('homeTeam', 'text_color', '#fff'), padding: '6px 8px', borderRadius: '4px', fontSize: '12px', fontWeight: 'bold', display: 'flex', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.2)', boxSizing: 'border-box' }}>
                           <span style={{ transform: getTextSkewTransform('homeTeam') }}>#{p.plyr}</span>
                           <span style={{ transform: getTextSkewTransform('homeTeam') }}>{formatTime(p.time)}</span>
                         </div>
