@@ -1548,7 +1548,7 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
         #control-panel input, #control-panel select { background-color: ${themeVars.bgInput} !important; color: ${themeVars.textColor} !important; border-color: ${themeVars.borderCol} !important; }
         #control-panel button.btn.btn-custom-bg { background: var(--btn-bg) !important; color: var(--btn-fg, #fff) !important; border: 1px solid rgba(0,0,0,0.25) !important; text-shadow: 0 1px 2px rgba(0,0,0,0.35); }
         #control-panel .team-row { gap: 6px !important; }
-        #control-panel .team-row > input { width: 72px !important; max-width: 72px !important; min-width: 0; }
+        #control-panel .team-row > input { width: calc(72px + 2ch) !important; max-width: calc(72px + 2ch) !important; min-width: 0; }
         #control-panel .team-row .btn.tr-narrow { flex: 0.75 1 0 !important; }
         #control-panel .team-row .btn.tr-wide { flex: 1.45 1 0 !important; }
         #control-panel .team-row .btn { flex: 1 1 0 !important; min-width: 0 !important; padding: 9px 4px !important; font-size: 10px !important; white-space: nowrap !important; overflow: hidden; text-overflow: ellipsis; }
@@ -2134,6 +2134,23 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                     </select>
                   );
                 })()}
+                {/* exact time, e.g. a penalty already partly served */}
+                <input
+                  type="number" id="inp-pen-min" tabIndex={-1} min="0" max="99"
+                  value={penMin}
+                  title="Minutes remaining"
+                  onChange={(e) => setPenMin(e.target.value)}
+                  style={{ width: '48px', flex: 'none', textAlign: 'center', padding: '6px 2px' }}
+                />
+                <span style={{ fontWeight: 'bold', flex: 'none' }}>:</span>
+                <input
+                  type="number" id="inp-pen-sec" tabIndex={-1} min="0" max="59"
+                  value={penSec}
+                  title="Seconds remaining"
+                  onChange={(e) => setPenSec(e.target.value)}
+                  onBlur={(e) => setPenSec(String(Math.min(59, Math.max(0, parseInt(e.target.value) || 0))).padStart(2, '0'))}
+                  style={{ width: '48px', flex: 'none', textAlign: 'center', padding: '6px 2px' }}
+                />
               </div>
             </div>
             <div className="row"><button className="btn btn-orange" style={{ borderRadius: '6px' }} onClick={() => updateField('penalties', [])}>CLEAR ALL PENALTIES</button></div>
@@ -2868,10 +2885,12 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                   </select>
                 </div>
 
-                {['awayPP', 'homePP', 'awayGoal', 'homeGoal', 'delayedPenalty', 'fourOnFour'].includes(selectedComp) && (() => {
+                {['awayPP', 'homePP', 'awayGoal', 'homeGoal', 'delayedPenalty', 'fourOnFour', 'shootout'].includes(selectedComp) && (() => {
                   const v = getGVar(`${selectedComp}_use_team_bg`, true);
                   const on = v !== false && v !== 'false';
-                  const what = selectedComp === 'fourOnFour'
+                  const what = selectedComp === 'shootout'
+                    ? 'Each team\'s row uses its Team Box background'
+                    : selectedComp === 'fourOnFour'
                     ? 'Blend of the Away and Home Team Box colors'
                     : selectedComp === 'delayedPenalty'
                       ? 'Penalized team\'s Team Box background (per-team DELAYED buttons)'

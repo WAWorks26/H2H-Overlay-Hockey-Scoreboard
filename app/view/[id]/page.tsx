@@ -1005,34 +1005,49 @@ export default function OBSOverlayPage({ params }: { params: Promise<{ id: strin
     const useGlobalSkew = gc.shootout_text_global_skew === true;
     const shootoutContainerSkew = useGlobalSkew ? skewAngle : `${gc.shootout_text_skew || 0}deg`;
 
+    // Each team's row uses that team's Team Box background unless "Match Team Box
+    // Background" is unticked for the Shootout Tracker element.
+    const soTeamBg = gc.shootout_use_team_bg !== false && gc.shootout_use_team_bg !== 'false';
+    const dot = (v: number) => ({
+      width: '18px', height: '18px', borderRadius: '50%', flex: 'none',
+      border: `2px solid ${soTeamBg ? 'rgba(255,255,255,0.55)' : '#555555'}`,
+      background: v === 1 ? '#10b981' : v === 2 ? '#ef4444' : (soTeamBg ? 'rgba(0,0,0,0.35)' : '#1a1a1a'),
+      boxShadow: v === 1 ? '0 0 8px #10b981' : v === 2 ? '0 0 8px #ef4444' : 'none',
+    });
+    const renderRow = (team: 'away' | 'home') => {
+      const teamKey = team === 'away' ? 'awayTeam' : 'homeTeam';
+      const teamCol = team === 'away' ? (state.away_color || '#00468b') : (state.home_color || '#111111');
+      return (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: '12px', padding: soTeamBg ? '6px 16px' : '0',
+          borderRadius: `${Math.max(0, (parseInt(gc.cornerRadius) || 8) - 2)}px`,
+          ...(soTeamBg ? { ...penChipBg(teamKey, teamCol), color: getCompVar(teamKey, 'text_color', '#ffffff') } : {}),
+        }}>
+          <span style={{ fontWeight: 'bold', minWidth: '70px', textAlign: 'right', whiteSpace: 'nowrap', paddingRight: '8px', flex: 'none' }}>
+            {team === 'away' ? state.away_name : state.home_name}
+          </span>
+          {/* dots spread across the full width of the scoreboard */}
+          <div style={{ display: 'flex', gap: '8px', flex: 1, justifyContent: 'space-evenly', minWidth: 0 }}>
+            {shootoutRounds.map((r, i) => <div key={i} style={dot(team === 'away' ? r.away : r.home)} />)}
+          </div>
+        </div>
+      );
+    };
+
     return (
       <div 
         style={{
-          marginTop: '6px', alignSelf: 'center', ...shootoutStyle,
-          borderRadius: `${gc.cornerRadius || 8}px`, padding: '8px 24px',
+          // stretch = same width as the main scoreboard above it
+          marginTop: '6px', alignSelf: 'stretch', boxSizing: 'border-box', ...shootoutStyle,
+          borderRadius: `${gc.cornerRadius || 8}px`, padding: soTeamBg ? '4px' : '8px 24px',
           boxShadow: '0 8px 16px rgba(0,0,0,0.6)', transform: `skewX(${shootoutContainerSkew})`,
-          display: 'flex', flexDirection: 'column', gap: '6px', zIndex: 100
+          display: 'flex', flexDirection: 'column', alignItems: 'stretch', justifyContent: 'center', gap: soTeamBg ? '4px' : '6px', zIndex: 100
         }}
       >
         {renderCompLayers('shootout', '#0a0a0a')}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', position: 'relative', zIndex: 3 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-            <span style={{ fontWeight: 'bold', width: '70px', textAlign: 'right', whiteSpace: 'nowrap', paddingRight: '8px' }}>{state.away_name}</span>
-            <div style={{ display: 'flex', gap: '8px' }}>
-              {shootoutRounds.map((r, i) => (
-                <div key={i} style={{ width: '18px', height: '18px', borderRadius: '50%', border: '2px solid #555555', background: r.away === 1 ? '#10b981' : r.away === 2 ? '#ef4444' : '#1a1a1a', boxShadow: r.away === 1 ? '0 0 8px #10b981' : r.away === 2 ? '0 0 8px #ef4444' : 'none' }} />
-              ))}
-            </div>
-          </div>
-
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-            <span style={{ fontWeight: 'bold', width: '70px', textAlign: 'right', whiteSpace: 'nowrap', paddingRight: '8px' }}>{state.home_name}</span>
-            <div style={{ display: 'flex', gap: '8px' }}>
-              {shootoutRounds.map((r, i) => (
-                <div key={i} style={{ width: '18px', height: '18px', borderRadius: '50%', border: '2px solid #555555', background: r.home === 1 ? '#10b981' : r.home === 2 ? '#ef4444' : '#1a1a1a', boxShadow: r.home === 1 ? '0 0 8px #10b981' : r.home === 2 ? '0 0 8px #ef4444' : 'none' }} />
-              ))}
-            </div>
-          </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: soTeamBg ? '4px' : '6px', position: 'relative', zIndex: 3 }}>
+          {renderRow('away')}
+          {renderRow('home')}
         </div>
       </div>
     );
