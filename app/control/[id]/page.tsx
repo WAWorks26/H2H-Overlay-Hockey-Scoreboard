@@ -971,6 +971,30 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
     </div>
   );
 
+  // The Team Box background (solid or gradient) for a team, as the overlay draws it
+  const teamBoxBg = (team: 'away' | 'home') => {
+    const key = team === 'away' ? 'awayTeam' : 'homeTeam';
+    const teamCol = team === 'away' ? (state?.away_color || '#00468b') : (state?.home_color || '#111111');
+    const type = getGVar(`${key}_bg_type`, 'solid') || 'solid';
+    const c1 = getGVar(`${key}_bg_color`, '') || teamCol;
+    const c2 = getGVar(`${key}_bg_col2`, '') || '#000000';
+    const c3 = getGVar(`${key}_bg_col3`, '') || '#888888';
+    const angle = getGVar(`${key}_bg_angle`, '90') || '90';
+    const midPos = parseFloat(getGVar(`${key}_mid_pos`, 50)) || 50;
+    const midW = parseFloat(getGVar(`${key}_mid_width`, 0)) || 0;
+    let bg = c1;
+    if (type === 'linear') bg = `linear-gradient(${angle}deg, ${c1}, ${c2})`;
+    else if (type === 'linear3') bg = `linear-gradient(${angle}deg, ${c1} 0%, ${c3} ${Math.max(0, midPos - midW / 2)}%, ${c3} ${Math.min(100, midPos + midW / 2)}%, ${c2} 100%)`;
+    else if (type === 'radial') bg = `radial-gradient(circle, ${c1}, ${c2})`;
+    else if (type === 'clear') bg = teamCol;
+    // dark or light text depending on the main color
+    const hex = String(type === 'clear' ? teamCol : c1).replace('#', '');
+    const full = hex.length === 3 ? hex.split('').map(ch => ch + ch).join('') : hex.slice(0, 6);
+    const r = parseInt(full.slice(0, 2), 16), g = parseInt(full.slice(2, 4), 16), b = parseInt(full.slice(4, 6), 16);
+    const lum = isNaN(r + g + b) ? 0 : (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    return { '--btn-bg': bg, '--btn-fg': lum > 0.62 ? '#111111' : '#ffffff' } as React.CSSProperties;
+  };
+
   const penRowBtn: React.CSSProperties = {
     borderRadius: '6px', flex: '1 1 0', minWidth: 0, width: 'auto', margin: 0, padding: '0 4px',
     fontWeight: 'bold', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', boxSizing: 'border-box', minHeight: '40px',
@@ -1520,6 +1544,12 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
         #control-panel .box { background-color: ${themeVars.bgBox} !important; border-color: ${themeVars.borderCol} !important; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }
         #control-panel .box h3, #control-panel .box label { color: ${themeVars.headerTextCol} !important; }
         #control-panel input, #control-panel select { background-color: ${themeVars.bgInput} !important; color: ${themeVars.textColor} !important; border-color: ${themeVars.borderCol} !important; }
+        #control-panel button.btn.btn-custom-bg { background: var(--btn-bg) !important; color: var(--btn-fg, #fff) !important; border: 1px solid rgba(0,0,0,0.25) !important; text-shadow: 0 1px 2px rgba(0,0,0,0.35); }
+        #control-panel .team-row { gap: 6px !important; }
+        #control-panel .team-row > input { width: 72px !important; max-width: 72px !important; min-width: 0; }
+        #control-panel .team-row .btn.tr-narrow { flex: 0.75 1 0 !important; }
+        #control-panel .team-row .btn.tr-wide { flex: 1.45 1 0 !important; }
+        #control-panel .team-row .btn { flex: 1 1 0 !important; min-width: 0 !important; padding: 9px 4px !important; font-size: 10px !important; white-space: nowrap !important; overflow: hidden; text-overflow: ellipsis; }
         #control-panel .ops-cols > .box { min-width: 0; margin: 0; }
         #control-panel .ops-col-handle:hover > div { background: #007bff !important; }
         @media (max-width: 900px) {
@@ -1973,29 +2003,35 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
             </div>
 
             <h3 style={{ fontSize: '14px', fontWeight: 'bold', borderBottom: `1px solid ${themeVars.borderCol}`, paddingBottom: '6px', marginBottom: '16px', zIndex: 1, position: 'relative' }}>TEAM CONTROLS</h3>
-            <div className="row" style={{ background: themeVars.bgInput, padding: '10px', borderRadius: '6px', position: 'relative', zIndex: 1 }}>
+            <div className="row team-row" style={{ background: themeVars.bgInput, padding: '10px', borderRadius: '6px', position: 'relative', zIndex: 1 }}>
               <input type="text" value={state.away_name} onChange={(e) => updateField('away_name', e.target.value)} style={{ maxWidth: '80px', flex: 'none', fontWeight: 'bold' }} />
-              <button className="btn btn-secondary-theme" onClick={() => adjStat('away', 'score', 1)}>+ GOAL</button>
-              <button className="btn btn-secondary-theme" onClick={() => adjStat('away', 'score', -1)}>-1 G</button>
+              <button className="btn btn-custom-bg" style={teamBoxBg('away')} onClick={() => adjStat('away', 'score', 1)}>+ GOAL</button>
+              <button className="btn btn-secondary-theme tr-narrow" onClick={() => adjStat('away', 'score', -1)}>-1 G</button>
               <button className="btn btn-secondary-theme" onClick={() => adjStat('away', 'sog', 1)}>+ SOG</button>
               <button className="btn btn-secondary-theme" onClick={() => adjStat('away', 'sog', -1)}>-1 SOG</button>
+              <button
+                className="btn btn-secondary-theme tr-wide"
+                style={{ whiteSpace: 'nowrap', outline: state.right_panel_mode === 'awayTimeout' ? '3px solid #F36C21' : 'none', outlineOffset: '-3px' }}
+                title="Show the away timeout rollout (click again to hide)"
+                onClick={() => triggerTeamRollout('timeout', 'away')}
+              >
+                TIMEOUT{state.right_panel_mode === 'awayTimeout' ? ' ●' : ''}
+              </button>
             </div>
-            <div className="row" style={{ marginTop: '-4px', padding: '0 10px', position: 'relative', zIndex: 1 }}>
-              <span style={{ width: '80px', flex: 'none', fontSize: '11px', fontWeight: 'bold', opacity: 0.7 }}>{state.away_name}</span>
-              <button className="btn" style={{ background: state.right_panel_mode === 'awayTimeout' ? '#F36C21' : '#1e5bb8', color: '#fff', whiteSpace: 'nowrap' }} title="Show the away timeout rollout (click again to hide)" onClick={() => triggerTeamRollout('timeout', 'away')}>TIMEOUT</button>
-              <button className="btn" style={{ background: state.right_panel_mode === 'awayDelayed' ? '#F36C21' : '#c0392b', color: '#fff', whiteSpace: 'nowrap' }} title="Show the delayed penalty rollout for away (click again to hide)" onClick={() => triggerTeamRollout('delayed', 'away')}>DELAYED PEN</button>
-            </div>
-            <div className="row" style={{ background: themeVars.bgInput, padding: '10px', borderRadius: '6px', position: 'relative', zIndex: 1 }}>
+            <div className="row team-row" style={{ background: themeVars.bgInput, padding: '10px', borderRadius: '6px', position: 'relative', zIndex: 1 }}>
               <input type="text" value={state.home_name} onChange={(e) => updateField('home_name', e.target.value)} style={{ maxWidth: '80px', flex: 'none', fontWeight: 'bold' }} />
-              <button className="btn btn-secondary-theme" onClick={() => adjStat('home', 'score', 1)}>+ GOAL</button>
-              <button className="btn btn-secondary-theme" onClick={() => adjStat('home', 'score', -1)}>-1 G</button>
+              <button className="btn btn-custom-bg" style={teamBoxBg('home')} onClick={() => adjStat('home', 'score', 1)}>+ GOAL</button>
+              <button className="btn btn-secondary-theme tr-narrow" onClick={() => adjStat('home', 'score', -1)}>-1 G</button>
               <button className="btn btn-secondary-theme" onClick={() => adjStat('home', 'sog', 1)}>+ SOG</button>
               <button className="btn btn-secondary-theme" onClick={() => adjStat('home', 'sog', -1)}>-1 SOG</button>
-            </div>
-            <div className="row" style={{ marginTop: '-4px', padding: '0 10px', position: 'relative', zIndex: 1 }}>
-              <span style={{ width: '80px', flex: 'none', fontSize: '11px', fontWeight: 'bold', opacity: 0.7 }}>{state.home_name}</span>
-              <button className="btn" style={{ background: state.right_panel_mode === 'homeTimeout' ? '#F36C21' : '#1e5bb8', color: '#fff', whiteSpace: 'nowrap' }} title="Show the home timeout rollout (click again to hide)" onClick={() => triggerTeamRollout('timeout', 'home')}>TIMEOUT</button>
-              <button className="btn" style={{ background: state.right_panel_mode === 'homeDelayed' ? '#F36C21' : '#c0392b', color: '#fff', whiteSpace: 'nowrap' }} title="Show the delayed penalty rollout for home (click again to hide)" onClick={() => triggerTeamRollout('delayed', 'home')}>DELAYED PEN</button>
+              <button
+                className="btn btn-secondary-theme tr-wide"
+                style={{ whiteSpace: 'nowrap', outline: state.right_panel_mode === 'homeTimeout' ? '3px solid #F36C21' : 'none', outlineOffset: '-3px' }}
+                title="Show the home timeout rollout (click again to hide)"
+                onClick={() => triggerTeamRollout('timeout', 'home')}
+              >
+                TIMEOUT{state.right_panel_mode === 'homeTimeout' ? ' ●' : ''}
+              </button>
             </div>
             <div className="row" style={{ position: 'relative', zIndex: 1 }}>
               <button className="btn btn-secondary-theme" onClick={() => resetStats('away')}>RESET AWAY STATS</button>
@@ -2059,8 +2095,8 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                   DELAYED
                 </button>
                 <button
-                  className="btn"
-                  style={{ ...penRowBtn, flex: '0.8 1 0', background: state.right_panel_mode === 'fourOnFour' ? '#F36C21' : '#5a6270', color: '#fff' }}
+                  className="btn btn-custom-bg"
+                  style={{ ...penRowBtn, flex: '0.8 1 0', '--btn-bg': state.right_panel_mode === 'fourOnFour' ? '#F36C21' : '#5a6270', '--btn-fg': '#fff' } as React.CSSProperties}
                   onClick={triggerFourOnFour}
                   title="4 on 4 rollout. Click again to hide."
                 >
