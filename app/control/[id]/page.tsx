@@ -2064,9 +2064,9 @@ export default function ControlPanelPage({ params }: { params: Promise<{ id: str
                         flex: '1 1 0', minWidth: 0, padding: '8px 6px', borderRadius: '6px', cursor: 'pointer', fontWeight: 'bold',
                         background: 'var(--btn-bg)', color: 'var(--btn-fg)',
                         opacity: on ? 1 : 0.4, filter: on ? 'none' : 'saturate(0.5)',
-                        // LED blue ring with glow on the active team
+                        // LED blue border on the active team
                         border: on ? '3px solid #00B4FF' : '3px solid transparent',
-                        boxShadow: on ? '0 0 6px 1px rgba(0,180,255,0.9), 0 0 14px 3px rgba(0,180,255,0.45), inset 0 0 6px rgba(0,180,255,0.55)' : 'none',
+                        boxShadow: 'none',
                         textShadow: '0 1px 2px rgba(0,0,0,0.35)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
                       }}
                     >
